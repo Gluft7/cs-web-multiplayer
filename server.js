@@ -85,6 +85,7 @@ setInterval(() => {
   Object.values(state.players).forEach(p => {
     if (!p.alive) return;
     
+    // Movimentação
     let dx = 0, dy = 0;
     if (p.keys.w) { dx += Math.cos(p.angle); dy += Math.sin(p.angle); }
     if (p.keys.s) { dx -= Math.cos(p.angle); dy -= Math.sin(p.angle); }
@@ -98,6 +99,14 @@ setInterval(() => {
     if (!resolveCollision(p.x + dx * speed, p.y, 14)) p.x += dx * speed;
     if (!resolveCollision(p.x, p.y + dy * speed, 14)) p.y += dy * speed;
 
+    // Lógica de pegar a C4 do chão (TR apenas)
+    if (p.team === 'TR' && state.c4.status === 'dropped' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 25) {
+      p.hasC4 = true;
+      state.c4.status = 'carried';
+      state.c4.carrierId = p.id;
+    }
+
+    // Lógica de Plant e Defuse (Corrigida para não bugar com outros players)
     if (p.keys.e && state.round.status === 'LIVE') {
       const inA = (p.x > MAP.siteA.x && p.x < MAP.siteA.x+MAP.siteA.w && p.y > MAP.siteA.y && p.y < MAP.siteA.y+MAP.siteA.h);
       const inB = (p.x > MAP.siteB.x && p.x < MAP.siteB.x+MAP.siteB.w && p.y > MAP.siteB.y && p.y < MAP.siteB.y+MAP.siteB.h);
@@ -111,8 +120,11 @@ setInterval(() => {
         if (state.c4.progress >= 100) endRound('CT', 'BOMBA DESARMADA!');
       }
     } else {
-      if (state.c4.status === 'planting') { state.c4.status = 'carried'; state.c4.progress = 0; }
-      if (state.c4.status === 'defusing') { state.c4.status = 'planted'; state.c4.progress = 0; }
+      // Só reseta o progresso se quem estava plantando/defusando soltar o E
+      if (p.hasC4 && state.c4.status === 'planting') { state.c4.status = 'carried'; state.c4.progress = 0; }
+      if (p.team === 'CT' && state.c4.status === 'defusing' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 50) { 
+        state.c4.status = 'planted'; state.c4.progress = 0; 
+      }
     }
   });
 
@@ -151,19 +163,18 @@ setInterval(() => {
         });
       }
       if (g.type === 'flash') {
-        let closestEnemy = null; let minDist = Infinity;
+        // Flash agora cega qualquer um (CT ou TR) que estiver no raio de 600
         Object.values(state.players).forEach(p => {
-          if (p.alive && p.team !== g.team) {
-            let dist = Math.hypot(p.x - g.x, p.y - g.y);
-            if (dist < minDist && dist < 800) { minDist = dist; closestEnemy = p; }
+          if (p.alive && Math.hypot(p.x - g.x, p.y - g.y) < 600) {
+            io.to(p.id).emit('flashEvent');
           }
         });
-        if (closestEnemy) io.to(closestEnemy.id).emit('flashEvent');
       }
       state.grenades.splice(i, 1);
     }
   }
 
+  // Timer dos efeitos
   for (let i = state.effects.length - 1; i >= 0; i--) {
     state.effects[i].life--;
     if (state.effects[i].life <= 0) state.effects.splice(i, 1);
@@ -171,7 +182,17 @@ setInterval(() => {
 
   let trAlive = 0, ctAlive = 0;
   Object.values(state.players).forEach(p => {
-    if (p.hp <= 0 && p.alive) { p.alive = false; p.hp = 0; if (p.hasC4) { p.hasC4 = false; state.c4.status = 'dropped'; state.c4.x = p.x; state.c4.y = p.y; } }
+    if (p.hp <= 0 && p.alive) { 
+      p.alive = false; 
+      p.hp = 0; 
+      // Dropa a C4 ao morrer
+      if (p.hasC4) { 
+        p.hasC4 = false; 
+        state.c4.status = 'dropped'; 
+        state.c4.x = p.x; 
+        state.c4.y = p.y; 
+      } 
+    }
     if (p.alive) p.team === 'TR' ? trAlive++ : ctAlive++;
   });
 
@@ -209,11 +230,9 @@ io.on('connection', socket => {
   
   if (Object.keys(state.players).length >= 1 && state.round.status === 'WARMUP') startRound();
 
-  // Trocar de Time
   socket.on('switchTeam', () => {
     let p = state.players[socket.id];
     if (p) {
-      // Se tiver a C4, solta ela no chão antes de virar CT
       if (p.hasC4) {
         p.hasC4 = false;
         state.c4.status = 'dropped';
