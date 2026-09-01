@@ -9,27 +9,38 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(express.static('public'));
 
 const MAP = {
-  width: 1000,
-  height: 650,
-  siteA: { x: 380, y: 80, w: 120, h: 120, name: 'A' },
-  siteB: { x: 380, y: 450, w: 120, h: 120, name: 'B' },
-  ctSpawn: { x: 80, y: 325 },
-  trSpawn: { x: 920, y: 325 },
+  width: 1400,
+  height: 800,
+  siteA: { x: 1080, y: 80, w: 180, h: 180, name: 'A' },
+  siteB: { x: 1080, y: 540, w: 180, h: 180, name: 'B' },
+  ctSpawn: { x: 100, y: 400 },
+  trSpawn: { x: 1300, y: 400 },
   walls: [
-    { x: 0, y: 0, w: 1000, h: 20 }, { x: 0, y: 630, w: 1000, h: 20 },
-    { x: 0, y: 0, w: 20, h: 650 }, { x: 980, y: 0, w: 20, h: 650 },
-    { x: 220, y: 180, w: 120, h: 80 }, { x: 220, y: 390, w: 120, h: 80 },
-    { x: 500, y: 240, w: 140, h: 170 }, { x: 680, y: 120, w: 100, h: 160 },
-    { x: 680, y: 370, w: 100, h: 160 }
+    // Paredes Externas
+    { x: 0, y: 0, w: 1400, h: 20 }, { x: 0, y: 780, w: 1400, h: 20 },
+    { x: 0, y: 0, w: 20, h: 800 }, { x: 1380, y: 0, w: 20, h: 800 },
+    
+    // Obstáculos do Meio e Corredores (Layout Competitivo)
+    { x: 250, y: 150, w: 140, h: 180 }, { x: 250, y: 470, w: 140, h: 180 },
+    { x: 500, y: 0, w: 50, h: 320 },   { x: 500, y: 480, w: 50, h: 320 },
+    { x: 700, y: 260, w: 200, h: 280 }, // Bloco Central Mid
+    { x: 980, y: 140, w: 60, h: 100 },  // Cobertura Site A
+    { x: 980, y: 560, w: 60, h: 100 },  // Cobertura Site B
+    { x: 1180, y: 320, w: 100, h: 160 } // Caixas Fundo TR
   ]
 };
 
 const gameState = {
   players: {},
   bullets: [],
+  grenades: [],
+  activeEffects: {
+    smokes: [],
+    molotovs: []
+  },
   c4: {
-    status: 'carried', // 'carried', 'dropped', 'planting', 'planted', 'defusing', 'defused', 'exploded'
-    x: 0, y: 0, carrierId: null, plantProgress: 0, defuseProgress: 0, timer: 40, lethalRadius: 350
+    status: 'carried',
+    x: 0, y: 0, carrierId: null, plantProgress: 0, defuseProgress: 0, timer: 40, lethalRadius: 400
   }
 };
 
@@ -47,6 +58,16 @@ function isInside(x, y, rect) {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 
+function dropC4IfCarried(p) {
+  if (p.hasC4) {
+    p.hasC4 = false;
+    gameState.c4.status = 'dropped';
+    gameState.c4.x = p.x;
+    gameState.c4.y = p.y;
+    gameState.c4.carrierId = null;
+  }
+}
+
 function startC4Timer() {
   gameState.c4.timer = 40;
   if (c4TickInterval) clearInterval(c4TickInterval);
@@ -59,6 +80,7 @@ function startC4Timer() {
           if (p.alive && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) <= gameState.c4.lethalRadius) {
             p.hp = 0;
             p.alive = false;
+            dropC4IfCarried(p);
           }
         });
         clearInterval(c4TickInterval);
@@ -83,7 +105,8 @@ io.on('connection', (socket) => {
     alive: true,
     hasC4: false,
     inputs: { w: false, a: false, s: false, d: false, e: false },
-    lastShot: 0
+    lastShot: 0,
+    lastGrenade: 0
   };
 
   if (team === 'TR' && !gameState.c4.carrierId && (gameState.c4.status === 'carried' || gameState.c4.status === 'dropped')) {
@@ -111,27 +134,45 @@ io.on('connection', (socket) => {
         y: p.y + Math.sin(p.angle) * 20,
         vx: Math.cos(p.angle + (Math.random() - 0.5) * 0.05) * 15,
         vy: Math.sin(p.angle + (Math.random() - 0.5) * 0.05) * 15,
-        ownerId: socket.id,
         team: p.team
       });
     }
   });
 
+  socket.on('throwGrenade', (data) => {
+    const p = gameState.players[socket.id];
+    if (!p || !p.alive) return;
+    const now = Date.now();
+    if (now - p.lastGrenade < 800) return; // Cooldown de arremesso
+    p.lastGrenade = now;
+
+    const dx = data.targetX - p.x;
+    const dy = data.targetY - p.y;
+    const dist = Math.min(Math.hypot(dx, dy), 380);
+    const angle = Math.atan2(dy, dx);
+
+    gameState.grenades.push({
+      type: data.type,
+      x: p.x,
+      y: p.y,
+      targetX: p.x + Math.cos(angle) * dist,
+      targetY: p.y + Math.sin(angle) * dist,
+      speed: 12
+    });
+  });
+
   socket.on('disconnect', () => {
     const p = gameState.players[socket.id];
-    if (p && p.hasC4) {
-      gameState.c4.status = 'dropped';
-      gameState.c4.x = p.x;
-      gameState.c4.y = p.y;
-      gameState.c4.carrierId = null;
-    }
+    if (p) dropC4IfCarried(p);
     delete gameState.players[socket.id];
   });
 });
 
-// Loop do Servidor (60 Ticks / segundo)
+// Loop principal (60 FPS)
 setInterval(() => {
-  // Coletar C4 do chão se TR passar por cima
+  const now = Date.now();
+
+  // Coleta C4
   if (gameState.c4.status === 'dropped') {
     Object.values(gameState.players).forEach(p => {
       if (p.alive && p.team === 'TR' && !p.hasC4 && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 25) {
@@ -142,10 +183,10 @@ setInterval(() => {
     });
   }
 
-  // 1. Movimentação e Ações
+  // Movimento e Ações
   Object.values(gameState.players).forEach(p => {
     if (!p.alive) return;
-    const speed = 2.2;
+    const speed = 2.4;
     let dx = 0, dy = 0;
 
     if (p.inputs.w) dy -= 1;
@@ -161,15 +202,15 @@ setInterval(() => {
     p.y += dy * speed;
     MAP.walls.forEach(w => { if (circleRectCollision(p.x, p.y, 14, w)) p.y -= dy * speed; });
 
-    // Lógica da Tecla E (Plantar / Defusar C4)
+    // Plant / Defuse
     if (p.inputs.e) {
       const inSite = isInside(p.x, p.y, MAP.siteA) || isInside(p.x, p.y, MAP.siteB);
       
-      // TR Plantando C4
+      // Plant C4 (Exatos 4.0 Segundos)
       if (p.team === 'TR' && p.hasC4 && inSite && (gameState.c4.status === 'carried' || gameState.c4.status === 'planting')) {
         gameState.c4.status = 'planting';
         gameState.c4.carrierId = p.id;
-        gameState.c4.plantProgress += (100 / (3.2 * 60)); // ~3.2 segundos
+        gameState.c4.plantProgress += (100 / (4.0 * 60));
         if (gameState.c4.plantProgress >= 100) {
           gameState.c4.status = 'planted';
           gameState.c4.x = p.x;
@@ -181,11 +222,11 @@ setInterval(() => {
         }
       }
 
-      // CT Defusando C4
+      // Defuse C4 (Exatos 5.0 Segundos)
       if (p.team === 'CT' && (gameState.c4.status === 'planted' || gameState.c4.status === 'defusing')) {
         if (Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 40) {
           gameState.c4.status = 'defusing';
-          gameState.c4.defuseProgress += (100 / (4.5 * 60)); // ~4.5 segundos
+          gameState.c4.defuseProgress += (100 / (5.0 * 60));
           if (gameState.c4.defuseProgress >= 100) {
             gameState.c4.status = 'defused';
             gameState.c4.defuseProgress = 0;
@@ -194,7 +235,6 @@ setInterval(() => {
         }
       }
     } else {
-      // Se soltar a tecla E, reseta o progresso
       if (gameState.c4.status === 'planting' && gameState.c4.carrierId === p.id) {
         gameState.c4.status = 'carried';
         gameState.c4.plantProgress = 0;
@@ -206,7 +246,56 @@ setInterval(() => {
     }
   });
 
-  // 2. Tiros
+  // Atualização de Granadas em Voo
+  for (let i = gameState.grenades.length - 1; i >= 0; i--) {
+    const g = gameState.grenades[i];
+    const dx = g.targetX - g.x;
+    const dy = g.targetY - g.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < g.speed) {
+      g.x = g.targetX;
+      g.y = g.targetY;
+      
+      // Detonação
+      if (g.type === 'smoke') {
+        gameState.activeEffects.smokes.push({ x: g.x, y: g.y, radius: 95, expiresAt: now + 12000 });
+      } else if (g.type === 'molotov') {
+        gameState.activeEffects.molotovs.push({ x: g.x, y: g.y, radius: 80, expiresAt: now + 7000 });
+      } else if (g.type === 'he') {
+        Object.values(gameState.players).forEach(p => {
+          if (!p.alive) return;
+          const d = Math.hypot(p.x - g.x, p.y - g.y);
+          if (d < 110) {
+            p.hp -= Math.floor((1 - d / 110) * 80);
+            if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
+          }
+        });
+      } else if (g.type === 'flash') {
+        io.emit('flashEvent', { x: g.x, y: g.y, radius: 450 });
+      }
+      gameState.grenades.splice(i, 1);
+    } else {
+      const angle = Math.atan2(dy, dx);
+      g.x += Math.cos(angle) * g.speed;
+      g.y += Math.sin(angle) * g.speed;
+    }
+  }
+
+  // Efeitos Ativos (Smoke / Fogo)
+  gameState.activeEffects.smokes = gameState.activeEffects.smokes.filter(s => s.expiresAt > now);
+  gameState.activeEffects.molotovs = gameState.activeEffects.molotovs.filter(m => {
+    if (m.expiresAt <= now) return false;
+    Object.values(gameState.players).forEach(p => {
+      if (p.alive && Math.hypot(p.x - m.x, p.y - m.y) < m.radius) {
+        p.hp -= 0.5; // Dano do Fogo
+        if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
+      }
+    });
+    return true;
+  });
+
+  // Projetéis de Tiros
   for (let i = gameState.bullets.length - 1; i >= 0; i--) {
     const b = gameState.bullets[i];
     b.x += b.vx;
@@ -219,17 +308,7 @@ setInterval(() => {
         if (p.alive && p.team !== b.team && Math.hypot(p.x - b.x, p.y - b.y) < 14) {
           p.hp -= 28;
           hit = true;
-          if (p.hp <= 0) {
-            p.hp = 0;
-            p.alive = false;
-            if (p.hasC4) {
-              p.hasC4 = false;
-              gameState.c4.status = 'dropped';
-              gameState.c4.x = p.x;
-              gameState.c4.y = p.y;
-              gameState.c4.carrierId = null;
-            }
-          }
+          if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
         }
       });
     }
