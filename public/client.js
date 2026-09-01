@@ -2,243 +2,222 @@ const socket = io();
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-canvas.width = 1400;
-canvas.height = 800;
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize); resize();
 
-const keys = { w: false, a: false, s: false, d: false, e: false };
-let mousePos = { x: 0, y: 0 };
+let gameState = null;
+let keys = { w: false, a: false, s: false, d: false, e: false };
 let localAngle = 0;
+let isLocked = false;
+let isShooting = false;
 let flashAlpha = 0;
-let latestState = { players: {}, bullets: [], grenades: [], activeEffects: { smokes: [], molotovs: [] }, c4: {} };
 
-const MAP = {
-  siteA: { x: 1080, y: 80, w: 180, h: 180, name: 'A' },
-  siteB: { x: 1080, y: 540, w: 180, h: 180, name: 'B' },
-  walls: [
-    { x: 0, y: 0, w: 1400, h: 20 }, { x: 0, y: 780, w: 1400, h: 20 },
-    { x: 0, y: 0, w: 20, h: 800 }, { x: 1380, y: 0, w: 20, h: 800 },
-    { x: 250, y: 150, w: 140, h: 180 }, { x: 250, y: 470, w: 140, h: 180 },
-    { x: 500, y: 0, w: 50, h: 320 },   { x: 500, y: 480, w: 50, h: 320 },
-    { x: 700, y: 260, w: 200, h: 280 },
-    { x: 980, y: 140, w: 60, h: 100 },  { x: 980, y: 560, w: 60, h: 100 },
-    { x: 1180, y: 320, w: 100, h: 160 }
-  ]
-};
+canvas.addEventListener('mousedown', (e) => { 
+  if (!isLocked) canvas.requestPointerLock(); 
+  else if (e.button === 0) isShooting = true; 
+});
+canvas.addEventListener('mouseup', (e) => { 
+  if (e.button === 0) isShooting = false; 
+});
 
+document.addEventListener('pointerlockchange', () => { isLocked = (document.pointerLockElement === canvas); });
+document.addEventListener('mousemove', e => {
+  if (isLocked) {
+    localAngle += e.movementX * 0.003;
+    socket.emit('input', { keys, angle: localAngle });
+  }
+});
 window.addEventListener('keydown', e => {
-  const k = e.key.toLowerCase();
-  if (k in keys) { keys[k] = true; sendInput(); }
+  let k = e.key.toLowerCase(); if (k in keys) keys[k] = true;
+  
+  if (['1','2','3','4'].includes(k)) socket.emit('switch', { '1':'rifle', '2':'smg', '3':'shotgun', '4':'awp' }[k]);
+  if (k === 'z') socket.emit('grenade', 'molotov');
+  if (k === 'x') socket.emit('grenade', 'smoke');
+  if (k === 'c') socket.emit('grenade', 'flash');
+  if (k === 'v') socket.emit('grenade', 'he');
 
-  // Teclas de Granadas
-  if (['x', 'c', 'v', 'z'].includes(k)) {
-    let type = '';
-    if (k === 'x') type = 'smoke';
-    if (k === 'c') type = 'flash';
-    if (k === 'v') type = 'he';
-    if (k === 'z') type = 'molotov';
-
-    socket.emit('throwGrenade', {
-      type: type,
-      targetX: mousePos.x,
-      targetY: mousePos.y
-    });
-  }
+  socket.emit('input', { keys, angle: localAngle });
 });
+window.addEventListener('keyup', e => { let k = e.key.toLowerCase(); if (k in keys) keys[k] = false; socket.emit('input', { keys, angle: localAngle }); });
 
-window.addEventListener('keyup', e => {
-  const k = e.key.toLowerCase();
-  if (k in keys) { keys[k] = false; sendInput(); }
-});
+socket.on('sync', state => { gameState = state; });
+socket.on('flashEvent', () => { flashAlpha = 1.0; }); 
 
-canvas.addEventListener('mousemove', e => {
-  const rect = canvas.getBoundingClientRect();
-  mousePos.x = e.clientX - rect.left;
-  mousePos.y = e.clientY - rect.top;
+function draw3D(cam) {
+  ctx.fillStyle = '#1c2026'; ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+  ctx.fillStyle = '#393530'; ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
 
-  const myPlayer = latestState.players[socket.id];
-  if (myPlayer) {
-    localAngle = Math.atan2(mousePos.y - myPlayer.y, mousePos.x - myPlayer.x);
-    sendInput();
-  }
-});
+  const FOV = Math.PI / 3;
+  const rays = Math.floor(canvas.width / 4);
+  const rayStep = FOV / rays;
+  const maxDepth = 1500;
+  
+  let zBuffer = new Array(rays).fill(maxDepth);
+  const walls = gameState.mapWalls || [];
 
-canvas.addEventListener('mousedown', e => {
-  if (e.button === 0) socket.emit('shoot');
-});
-
-function sendInput() {
-  socket.emit('playerInput', { keys, angle: localAngle });
-}
-
-socket.on('stateUpdate', state => { latestState = state; });
-
-socket.on('flashEvent', data => {
-  const myPlayer = latestState.players[socket.id];
-  if (myPlayer && myPlayer.alive) {
-    const d = Math.hypot(myPlayer.x - data.x, myPlayer.y - data.y);
-    if (d < data.radius) flashAlpha = 1.0; // Flash Total
-  }
-});
-
-function render() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // 1. Bomb Sites
-  [MAP.siteA, MAP.siteB].forEach(s => {
-    ctx.fillStyle = 'rgba(255, 153, 0, 0.15)';
-    ctx.strokeStyle = '#ff9900';
-    ctx.lineWidth = 2;
-    ctx.fillRect(s.x, s.y, s.w, s.h);
-    ctx.strokeRect(s.x, s.y, s.w, s.h);
-    ctx.fillStyle = '#ff9900';
-    ctx.font = 'bold 26px sans-serif';
-    ctx.fillText(s.name, s.x + 80, s.y + 100);
-  });
-
-  // 2. Paredes
-  ctx.fillStyle = '#21262d';
-  ctx.strokeStyle = '#30363d';
-  MAP.walls.forEach(w => {
-    ctx.fillRect(w.x, w.y, w.w, w.h);
-    ctx.strokeRect(w.x, w.y, w.w, w.h);
-  });
-
-  // 3. Fogo do Molotov
-  latestState.activeEffects.molotovs.forEach(m => {
-    ctx.beginPath();
-    ctx.arc(m.x, m.y, m.radius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 68, 0, 0.45)';
-    ctx.fill();
-  });
-
-  // 4. C4 no Chão/Plantada
-  const c4 = latestState.c4;
-  if (c4.status === 'dropped') {
-    ctx.fillStyle = '#ff0000';
-    ctx.fillRect(c4.x - 6, c4.y - 6, 12, 12);
-  } else if (c4.status === 'planted' || c4.status === 'defusing') {
-    ctx.beginPath();
-    ctx.arc(c4.x, c4.y, c4.lethalRadius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.05)';
-    ctx.fill();
-    ctx.fillStyle = (Math.floor(Date.now() / 200) % 2 === 0) ? '#ff0000' : '#ffffff';
-    ctx.beginPath(); ctx.arc(c4.x, c4.y, 7, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // 5. Tiros
-  ctx.fillStyle = '#ffee55';
-  latestState.bullets.forEach(b => {
-    ctx.beginPath(); ctx.arc(b.x, b.y, 2.5, 0, Math.PI * 2); ctx.fill();
-  });
-
-  // 6. Granadas em Voo
-  latestState.grenades.forEach(g => {
-    ctx.beginPath(); ctx.arc(g.x, g.y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = g.type === 'flash' ? '#ffffff' : g.type === 'smoke' ? '#aaaaaa' : '#ffaa00';
-    ctx.fill();
-  });
-
-  // 7. Jogadores e FOV
-  Object.values(latestState.players).forEach(p => {
-    if (!p.alive) return;
-
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.angle);
-
-    // FOV 90°
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, 240, -Math.PI / 4, Math.PI / 4);
-    ctx.closePath();
-    ctx.fillStyle = p.team === 'CT' ? 'rgba(0, 170, 255, 0.12)' : 'rgba(255, 204, 0, 0.12)';
-    ctx.fill();
-
-    // Arma
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, -2, 18, 4);
-    ctx.restore();
-
-    // Corpo
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
-    ctx.fillStyle = p.team === 'CT' ? '#0099ff' : '#ffaa00';
-    ctx.fill();
-    ctx.strokeStyle = p.id === socket.id ? '#ffffff' : '#000000';
-    ctx.lineWidth = p.id === socket.id ? 2.5 : 1;
-    ctx.stroke();
-
-    if (p.hasC4) {
-      ctx.fillStyle = '#ff0000';
-      ctx.fillRect(p.x - 4, p.y - 4, 8, 8);
+  for(let i = 0; i < rays; i++) {
+    let rayAngle = cam.angle - FOV/2 + i * rayStep;
+    let dirX = Math.cos(rayAngle);
+    let dirY = Math.sin(rayAngle);
+    let distance = 0; let hitWall = false;
+    
+    while (!hitWall && distance < maxDepth) {
+        distance += 10;
+        let testX = cam.x + dirX * distance; let testY = cam.y + dirY * distance;
+        for (let w of walls) {
+            if (testX >= w.x && testX <= w.x + w.w && testY >= w.y && testY <= w.y + w.h) { hitWall = true; break; }
+        }
     }
 
-    // Barra HP
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(p.x - 15, p.y - 22, 30, 4);
-    ctx.fillStyle = p.hp > 40 ? '#00ff88' : '#ff3344';
-    ctx.fillRect(p.x - 15, p.y - 22, (p.hp / 100) * 30, 4);
-  });
-
-  // 8. Fumaça (Smoke - Desenhar por cima dos players)
-  latestState.activeEffects.smokes.forEach(s => {
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(120, 130, 140, 0.94)';
-    ctx.fill();
-  });
-
-  // 9. Progresso Plant/Defuse
-  if (c4.status === 'planting' || c4.status === 'defusing') {
-    const isPlanting = c4.status === 'planting';
-    const progress = isPlanting ? c4.plantProgress : c4.defuseProgress;
-    const label = isPlanting ? 'PLANTANDO C4 (4s)...' : 'DEFUSANDO C4 (5s)...';
-    const color = isPlanting ? '#ff3300' : '#00aaff';
-
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.fillRect(550, 710, 300, 22);
-    ctx.fillStyle = color;
-    ctx.fillRect(550, 710, (Math.min(100, progress) / 100) * 300, 22);
-    ctx.strokeStyle = '#ffffff';
-    ctx.strokeRect(550, 710, 300, 22);
-
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(label, 700, 725);
+    if (hitWall) {
+        let correctedDist = distance * Math.cos(rayAngle - cam.angle);
+        zBuffer[i] = correctedDist;
+        let wallHeight = (canvas.height / correctedDist) * 35;
+        let shade = Math.max(20, 255 - distance / 4);
+        ctx.fillStyle = `rgb(${shade/2.5}, ${shade/2.2}, ${shade/2})`;
+        ctx.fillRect(i * 4, canvas.height/2 - wallHeight/2, 5, wallHeight);
+    }
   }
 
-  // 10. Efeito Flashbang
+  let entities = [];
+  
+  // Incluindo Jogadores, Granadas voando, Balas e Efeitos (Fumaça/Fogo) para o Raycaster enxergar
+  Object.values(gameState.players).forEach(p => { if (p.alive && p.id !== cam.id) entities.push({ ...p, isPlayer: true }); });
+  gameState.grenades.forEach(g => entities.push({ ...g, isGrenade: true }));
+  gameState.bullets.forEach(b => entities.push({ ...b, isBullet: true }));
+  gameState.effects.forEach(e => entities.push({ ...e, isEffect: true }));
+
+  entities.sort((a, b) => Math.hypot(b.x - cam.x, b.y - cam.y) - Math.hypot(a.x - cam.x, a.y - cam.y));
+
+  entities.forEach(ent => {
+      let dx = ent.x - cam.x; let dy = ent.y - cam.y;
+      let dist = Math.hypot(dx, dy);
+      
+      let angleToEnt = Math.atan2(dy, dx) - cam.angle;
+      while(angleToEnt < -Math.PI) angleToEnt += 2*Math.PI;
+      while(angleToEnt > Math.PI) angleToEnt -= 2*Math.PI;
+      
+      if (Math.abs(angleToEnt) < FOV/2 + 0.5 && dist > 15) {
+          let correctedDist = dist * Math.cos(angleToEnt);
+          let screenX = (0.5 * (angleToEnt / (FOV/2)) + 0.5) * canvas.width;
+          let rayIndex = Math.floor((screenX / canvas.width) * rays);
+          
+          if (rayIndex >= 0 && rayIndex < rays && zBuffer[rayIndex] > dist) {
+              if (ent.isPlayer) {
+                  let spriteHeight = (canvas.height / correctedDist) * 30;
+                  let spriteWidth = spriteHeight * 0.6;
+                  let startX = screenX - spriteWidth/2;
+
+                  ctx.fillStyle = ent.team === 'CT' ? '#0077ff' : '#ffaa00';
+                  ctx.fillRect(startX, canvas.height/2 - spriteHeight/2, spriteWidth, spriteHeight);
+                  
+                  ctx.fillStyle = 'red'; ctx.fillRect(startX, canvas.height/2 - spriteHeight/2 - 10, spriteWidth, 5);
+                  ctx.fillStyle = '#0f0'; ctx.fillRect(startX, canvas.height/2 - spriteHeight/2 - 10, spriteWidth * (ent.hp/100), 5);
+              } 
+              else if (ent.isGrenade) {
+                  let size = (canvas.height / correctedDist) * 5;
+                  ctx.fillStyle = ent.type === 'smoke' ? '#aaa' : (ent.type === 'molotov' ? 'orange' : '#333');
+                  if (ent.type === 'flash') ctx.fillStyle = 'white';
+                  ctx.fillRect(screenX - size/2, canvas.height/2 + size, size, size);
+              }
+              else if (ent.isBullet) {
+                  let size = (canvas.height / correctedDist) * 3;
+                  ctx.fillStyle = 'yellow';
+                  ctx.fillRect(screenX - size/2, canvas.height/2, size, size);
+              }
+              else if (ent.isEffect) {
+                  let size = (canvas.height / correctedDist) * (ent.radius || 100);
+                  ctx.fillStyle = ent.type === 'smoke' ? 'rgba(150, 150, 150, 0.95)' : 'rgba(255, 100, 0, 0.7)';
+                  ctx.fillRect(screenX - size/2, canvas.height/2 - size/3, size, size/1.5);
+              }
+          }
+      }
+  });
+
+  ctx.fillStyle = '#0f0'; ctx.fillRect(canvas.width/2 - 2, canvas.height/2 - 2, 4, 4);
+
   if (flashAlpha > 0) {
-    ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    flashAlpha -= (1 / (3.0 * 60)); // Decaimento em 3s
-    if (flashAlpha < 0) flashAlpha = 0;
+    ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    flashAlpha -= 0.005; 
   }
-
-  // 11. HUD Superior
-  const ctAlive = Object.values(latestState.players).filter(p => p.team === 'CT' && p.alive).length;
-  const trAlive = Object.values(latestState.players).filter(p => p.team === 'TR' && p.alive).length;
-
-  ctx.fillStyle = 'rgba(15, 20, 28, 0.85)';
-  ctx.fillRect(550, 10, 300, 40);
-  ctx.strokeStyle = '#30363d';
-  ctx.strokeRect(550, 10, 300, 40);
-
-  ctx.font = 'bold 16px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#00aaff'; ctx.fillText(`CT: ${ctAlive}`, 600, 35);
-  ctx.fillStyle = '#ffcc00'; ctx.fillText(`TR: ${trAlive}`, 800, 35);
-
-  if (c4.status === 'planted' || c4.status === 'defusing') {
-    ctx.fillStyle = (Math.floor(Date.now() / 250) % 2 === 0) ? '#ff3333' : '#ffffff';
-    ctx.fillText(`💣 ${c4.timer}s`, 700, 35);
-  } else {
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(`VS`, 700, 35);
-  }
-
-  requestAnimationFrame(render);
 }
 
-render();
+function drawMinimap(cam) {
+  const mmSize = 220; 
+  const scale = 0.15;
+
+  ctx.save();
+  ctx.translate(canvas.width - mmSize/2 - 20, mmSize/2 + 20);
+  ctx.beginPath(); ctx.arc(0, 0, mmSize/2, 0, Math.PI*2); ctx.clip();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; ctx.fillRect(-mmSize/2, -mmSize/2, mmSize, mmSize);
+
+  ctx.rotate(-cam.angle - Math.PI/2);
+  ctx.translate(-cam.x * scale, -cam.y * scale);
+
+  ctx.fillStyle = '#555';
+  gameState.mapWalls.forEach(w => ctx.fillRect(w.x*scale, w.y*scale, w.w*scale, w.h*scale));
+
+  ctx.fillStyle = 'rgba(255, 165, 0, 0.4)';
+  ctx.fillRect(100*scale, 80*scale, 200*scale, 200*scale); 
+  ctx.fillRect(1100*scale, 80*scale, 200*scale, 200*scale); 
+
+  Object.values(gameState.players).forEach(p => {
+    if (p.alive && (p.team === cam.team || !gameState.players[socket.id].alive)) {
+      ctx.fillStyle = p.id === cam.id ? '#0f0' : '#0af';
+      ctx.beginPath(); ctx.arc(p.x*scale, p.y*scale, 4, 0, Math.PI*2); ctx.fill();
+      if (p.hasC4) { ctx.fillStyle = 'red'; ctx.fillRect(p.x*scale-2, p.y*scale-2, 4, 4); }
+    }
+  });
+
+  if (gameState.c4.status !== 'carried') {
+    ctx.fillStyle = gameState.c4.status === 'planted' ? 'red' : 'white';
+    ctx.beginPath(); ctx.arc(gameState.c4.x*scale, gameState.c4.y*scale, 5, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHUD(cam) {
+  ctx.fillStyle = 'rgba(20, 20, 20, 0.9)'; ctx.fillRect(20, canvas.height - 80, 250, 60);
+  ctx.fillStyle = '#fff'; ctx.font = '18px Arial'; ctx.textAlign = 'left';
+  ctx.fillText(`HP: ${cam.hp} | ARMA: ${cam.weapon.toUpperCase()}`, 35, canvas.height - 45);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(canvas.width/2 - 40, 20, 80, 40);
+  ctx.fillStyle = gameState.c4.status === 'planted' ? 'red' : '#fff';
+  ctx.font = 'bold 24px Arial'; ctx.textAlign = 'center';
+  
+  let timeStr = gameState.c4.status === 'planted' ? gameState.c4.timer : gameState.round.time;
+  let m = Math.floor(timeStr / 60); let s = timeStr % 60;
+  ctx.fillText(`${m}:${s < 10 ? '0' : ''}${s}`, canvas.width/2, 48);
+
+  if (gameState.c4.status === 'planting' || gameState.c4.status === 'defusing') {
+    ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(canvas.width/2 - 150, canvas.height - 150, 300, 20);
+    ctx.fillStyle = gameState.c4.status === 'planting' ? 'red' : 'blue';
+    ctx.fillRect(canvas.width/2 - 150, canvas.height - 150, (gameState.c4.progress/100) * 300, 20);
+  }
+
+  if (gameState.round.msg) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, canvas.height/4 - 30, canvas.width, 60);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 32px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(gameState.round.msg, canvas.width/2, canvas.height/4 + 10);
+  }
+}
+
+function draw() {
+  requestAnimationFrame(draw);
+  if (!gameState || !gameState.players[socket.id]) return;
+  
+  if (isShooting) socket.emit('shoot');
+
+  const me = gameState.players[socket.id];
+  let cam = me;
+  if (!me.alive) {
+    const allies = Object.values(gameState.players).filter(p => p.team === me.team && p.alive);
+    if (allies.length > 0) cam = allies[0]; else return;
+  } else { cam.angle = localAngle; }
+
+  draw3D(cam);
+  drawMinimap(cam);
+  drawHUD(cam);
+}
+
+draw();

@@ -9,317 +9,242 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(express.static('public'));
 
 const MAP = {
-  width: 1400,
-  height: 800,
-  siteA: { x: 1080, y: 80, w: 180, h: 180, name: 'A' },
-  siteB: { x: 1080, y: 540, w: 180, h: 180, name: 'B' },
-  ctSpawn: { x: 100, y: 400 },
-  trSpawn: { x: 1300, y: 400 },
+  width: 1400, height: 800,
+  siteA: { x: 100, y: 80, w: 200, h: 200, name: 'A' },
+  siteB: { x: 1100, y: 80, w: 200, h: 200, name: 'B' },
+  ctSpawn: { x: 700, y: 120 }, trSpawn: { x: 700, y: 720 },
   walls: [
-    // Paredes Externas
     { x: 0, y: 0, w: 1400, h: 20 }, { x: 0, y: 780, w: 1400, h: 20 },
     { x: 0, y: 0, w: 20, h: 800 }, { x: 1380, y: 0, w: 20, h: 800 },
-    
-    // Obstáculos do Meio e Corredores (Layout Competitivo)
-    { x: 250, y: 150, w: 140, h: 180 }, { x: 250, y: 470, w: 140, h: 180 },
-    { x: 500, y: 0, w: 50, h: 320 },   { x: 500, y: 480, w: 50, h: 320 },
-    { x: 700, y: 260, w: 200, h: 280 }, // Bloco Central Mid
-    { x: 980, y: 140, w: 60, h: 100 },  // Cobertura Site A
-    { x: 980, y: 560, w: 60, h: 100 },  // Cobertura Site B
-    { x: 1180, y: 320, w: 100, h: 160 } // Caixas Fundo TR
+    { x: 120, y: 350, w: 250, h: 30 }, { x: 220, y: 480, w: 30, h: 180 },
+    { x: 350, y: 480, w: 180, h: 30 }, { x: 250, y: 220, w: 30, h: 140 },
+    { x: 380, y: 100, w: 30, h: 200 }, { x: 100, y: 560, w: 140, h: 30 },
+    { x: 1030, y: 350, w: 250, h: 30 }, { x: 1150, y: 480, w: 30, h: 180 },
+    { x: 870, y: 480, w: 180, h: 30 }, { x: 1120, y: 220, w: 30, h: 140 },
+    { x: 990, y: 100, w: 30, h: 200 }, { x: 1160, y: 560, w: 140, h: 30 },
+    { x: 450, y: 640, w: 160, h: 30 }, { x: 790, y: 640, w: 160, h: 30 },
+    { x: 500, y: 280, w: 120, h: 30 }, { x: 780, y: 280, w: 120, h: 30 },
+    { x: 600, y: 380, w: 200, h: 40 }, { x: 480, y: 420, w: 30, h: 150 },
+    { x: 890, y: 420, w: 30, h: 150 }
   ]
 };
 
-const gameState = {
-  players: {},
-  bullets: [],
-  grenades: [],
-  activeEffects: {
-    smokes: [],
-    molotovs: []
-  },
-  c4: {
-    status: 'carried',
-    x: 0, y: 0, carrierId: null, plantProgress: 0, defuseProgress: 0, timer: 40, lethalRadius: 400
-  }
+const WEAPONS = {
+  rifle:   { cooldown: 120, damage: 30, speed: 25, spread: 0.03, pellets: 1, moveSpeed: 2.5 },
+  smg:     { cooldown: 80,  damage: 15, speed: 20, spread: 0.08, pellets: 1, moveSpeed: 2.8 },
+  shotgun: { cooldown: 800, damage: 20, speed: 18, spread: 0.20, pellets: 8, moveSpeed: 2.4 },
+  awp:     { cooldown: 1400,damage: 120,speed: 35, spread: 0.001, pellets: 1, moveSpeed: 2.0 }
 };
 
-let c4TickInterval = null;
+const state = {
+  players: {}, bullets: [], grenades: [], effects: [], mapWalls: MAP.walls,
+  c4: { status: 'carried', x: 0, y: 0, carrierId: null, progress: 0, timer: 0 },
+  round: { status: 'WARMUP', time: 30, winner: null, msg: '' }
+};
 
-function circleRectCollision(cx, cy, radius, rect) {
-  const nearestX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
-  const nearestY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
-  const dx = cx - nearestX;
-  const dy = cy - nearestY;
-  return (dx * dx + dy * dy) < (radius * radius);
+function checkCollision(cx, cy, radius, rect) {
+  const nearX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
+  const nearY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
+  return (Math.pow(cx - nearX, 2) + Math.pow(cy - nearY, 2)) <= (radius * radius);
 }
 
-function isInside(x, y, rect) {
-  return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+function resolveCollision(x, y, radius) {
+  for (let wall of MAP.walls) if (checkCollision(x, y, radius, wall)) return true;
+  return false;
 }
 
-function dropC4IfCarried(p) {
-  if (p.hasC4) {
-    p.hasC4 = false;
-    gameState.c4.status = 'dropped';
-    gameState.c4.x = p.x;
-    gameState.c4.y = p.y;
-    gameState.c4.carrierId = null;
+function startRound() {
+  state.round.status = 'LIVE'; state.round.time = 90; state.round.msg = '';
+  state.bullets = []; state.grenades = []; state.effects = [];
+  
+  Object.values(state.players).forEach(p => {
+    p.alive = true; p.hp = 100; p.hasC4 = false;
+    p.grenades = { smoke: 1, flash: 1, he: 1, molotov: 1 };
+    const spawn = p.team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
+    p.x = spawn.x + (Math.random() * 60 - 30);
+    p.y = spawn.y + (Math.random() * 60 - 30);
+  });
+  
+  state.c4 = { status: 'carried', x: 0, y: 0, carrierId: null, progress: 0, timer: 40 };
+  const trs = Object.values(state.players).filter(p => p.team === 'TR');
+  if (trs.length > 0) {
+    const carrier = trs[Math.floor(Math.random() * trs.length)];
+    carrier.hasC4 = true; state.c4.carrierId = carrier.id;
   }
 }
 
-function startC4Timer() {
-  gameState.c4.timer = 40;
-  if (c4TickInterval) clearInterval(c4TickInterval);
-  c4TickInterval = setInterval(() => {
-    if (gameState.c4.status === 'planted' || gameState.c4.status === 'defusing') {
-      gameState.c4.timer--;
-      if (gameState.c4.timer <= 0) {
-        gameState.c4.status = 'exploded';
-        Object.values(gameState.players).forEach(p => {
-          if (p.alive && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) <= gameState.c4.lethalRadius) {
-            p.hp = 0;
-            p.alive = false;
-            dropC4IfCarried(p);
+function endRound(winner, msg) {
+  if (state.round.status === 'ENDED') return;
+  state.round.status = 'ENDED'; state.round.winner = winner; state.round.msg = msg;
+  setTimeout(startRound, 5000);
+}
+
+setInterval(() => {
+  let totalPlayers = Object.keys(state.players).length;
+
+  Object.values(state.players).forEach(p => {
+    if (!p.alive) return;
+    
+    let dx = 0, dy = 0;
+    if (p.keys.w) { dx += Math.cos(p.angle); dy += Math.sin(p.angle); }
+    if (p.keys.s) { dx -= Math.cos(p.angle); dy -= Math.sin(p.angle); }
+    if (p.keys.a) { dx += Math.cos(p.angle - Math.PI/2); dy += Math.sin(p.angle - Math.PI/2); }
+    if (p.keys.d) { dx += Math.cos(p.angle + Math.PI/2); dy += Math.sin(p.angle + Math.PI/2); }
+    
+    const mag = Math.hypot(dx, dy);
+    if (mag > 0) { dx /= mag; dy /= mag; } 
+
+    const speed = (WEAPONS[p.weapon] || WEAPONS.rifle).moveSpeed;
+    if (!resolveCollision(p.x + dx * speed, p.y, 14)) p.x += dx * speed;
+    if (!resolveCollision(p.x, p.y + dy * speed, 14)) p.y += dy * speed;
+
+    if (p.keys.e && state.round.status === 'LIVE') {
+      const inA = (p.x > MAP.siteA.x && p.x < MAP.siteA.x+MAP.siteA.w && p.y > MAP.siteA.y && p.y < MAP.siteA.y+MAP.siteA.h);
+      const inB = (p.x > MAP.siteB.x && p.x < MAP.siteB.x+MAP.siteB.w && p.y > MAP.siteB.y && p.y < MAP.siteB.y+MAP.siteB.h);
+
+      if (p.team === 'TR' && p.hasC4 && (inA || inB)) {
+        state.c4.status = 'planting'; state.c4.progress += (100 / (60 * 4)); 
+        if (state.c4.progress >= 100) { state.c4.status = 'planted'; state.c4.x = p.x; state.c4.y = p.y; p.hasC4 = false; }
+      }
+      if (p.team === 'CT' && state.c4.status === 'planted' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 50) {
+        state.c4.status = 'defusing'; state.c4.progress += (100 / (60 * 5));
+        if (state.c4.progress >= 100) endRound('CT', 'BOMBA DESARMADA!');
+      }
+    } else {
+      if (state.c4.status === 'planting') { state.c4.status = 'carried'; state.c4.progress = 0; }
+      if (state.c4.status === 'defusing') { state.c4.status = 'planted'; state.c4.progress = 0; }
+    }
+  });
+
+  // Física e Remoção de Balas
+  for (let i = state.bullets.length - 1; i >= 0; i--) {
+    let b = state.bullets[i];
+    let hit = false;
+    for(let s = 0; s < 10; s++) {
+      b.x += b.vx / 10; b.y += b.vy / 10;
+      if (resolveCollision(b.x, b.y, 2)) { hit = true; break; }
+      Object.values(state.players).forEach(p => {
+        if (p.alive && p.team !== b.team && Math.hypot(p.x - b.x, p.y - b.y) < 14) {
+          p.hp -= b.damage; hit = true;
+        }
+      });
+      if (hit) break;
+    }
+    if (hit) state.bullets.splice(i, 1);
+  }
+
+  // Física de Granadas
+  for (let i = state.grenades.length - 1; i >= 0; i--) {
+    let g = state.grenades[i];
+    if (resolveCollision(g.x + g.vx, g.y, 5)) g.vx *= -0.7; else g.x += g.vx;
+    if (resolveCollision(g.x, g.y + g.vy, 5)) g.vy *= -0.7; else g.y += g.vy;
+    g.vx *= 0.95; g.vy *= 0.95;
+    g.timer--;
+
+    if (g.timer <= 0) {
+      if (g.type === 'smoke') state.effects.push({ type: 'smoke', x: g.x, y: g.y, life: 60 * 15, radius: 110 });
+      if (g.type === 'molotov') state.effects.push({ type: 'molotov', x: g.x, y: g.y, life: 60 * 7, radius: 90 });
+      if (g.type === 'he') {
+        Object.values(state.players).forEach(p => {
+          let dist = Math.hypot(p.x - g.x, p.y - g.y);
+          if (p.alive && dist < 150) p.hp -= Math.floor((1 - dist/150) * 80);
+        });
+      }
+      if (g.type === 'flash') {
+        let closestEnemy = null; let minDist = Infinity;
+        Object.values(state.players).forEach(p => {
+          if (p.alive && p.team !== g.team) {
+            let dist = Math.hypot(p.x - g.x, p.y - g.y);
+            if (dist < minDist && dist < 800) { minDist = dist; closestEnemy = p; }
           }
         });
-        clearInterval(c4TickInterval);
+        if (closestEnemy) io.to(closestEnemy.id).emit('flashEvent');
       }
+      state.grenades.splice(i, 1);
     }
-  }, 1000);
-}
-
-io.on('connection', (socket) => {
-  const trCount = Object.values(gameState.players).filter(p => p.team === 'TR').length;
-  const ctCount = Object.values(gameState.players).filter(p => p.team === 'CT').length;
-  const team = trCount <= ctCount ? 'TR' : 'CT';
-  const spawn = team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
-
-  gameState.players[socket.id] = {
-    id: socket.id,
-    team: team,
-    x: spawn.x + (Math.random() * 40 - 20),
-    y: spawn.y + (Math.random() * 40 - 20),
-    angle: 0,
-    hp: 100,
-    alive: true,
-    hasC4: false,
-    inputs: { w: false, a: false, s: false, d: false, e: false },
-    lastShot: 0,
-    lastGrenade: 0
-  };
-
-  if (team === 'TR' && !gameState.c4.carrierId && (gameState.c4.status === 'carried' || gameState.c4.status === 'dropped')) {
-    gameState.players[socket.id].hasC4 = true;
-    gameState.c4.carrierId = socket.id;
-    gameState.c4.status = 'carried';
   }
 
-  socket.on('playerInput', (inputs) => {
-    const p = gameState.players[socket.id];
-    if (p) {
-      p.inputs = inputs.keys || p.inputs;
-      p.angle = inputs.angle || p.angle;
+  // Timer dos efeitos (Fumaça e Fogo)
+  for (let i = state.effects.length - 1; i >= 0; i--) {
+    state.effects[i].life--;
+    if (state.effects[i].life <= 0) state.effects.splice(i, 1);
+  }
+
+  let trAlive = 0, ctAlive = 0;
+  Object.values(state.players).forEach(p => {
+    if (p.hp <= 0 && p.alive) { p.alive = false; p.hp = 0; if (p.hasC4) { p.hasC4 = false; state.c4.status = 'dropped'; state.c4.x = p.x; state.c4.y = p.y; } }
+    if (p.alive) p.team === 'TR' ? trAlive++ : ctAlive++;
+  });
+
+  if (state.round.status === 'LIVE' && totalPlayers > 1) {
+    if (trAlive === 0 && state.c4.status !== 'planted') endRound('CT', 'CT VENCE!');
+    else if (ctAlive === 0) endRound('TR', 'TR VENCE!');
+  }
+
+  io.emit('sync', state);
+}, 1000 / 60);
+
+setInterval(() => {
+  if (state.round.status === 'LIVE' && state.c4.status !== 'planted') {
+    state.round.time--;
+    if (state.round.time <= 0) endRound('CT', 'TEMPO ESGOTOU!');
+  }
+  if (state.c4.status === 'planted' || state.c4.status === 'defusing') {
+    state.c4.timer--;
+    if (state.c4.timer <= 0) {
+      endRound('TR', 'BOMBA EXPLODIU!');
+      Object.values(state.players).forEach(p => { if (Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 450) p.hp = 0; });
+    }
+  }
+}, 1000);
+
+io.on('connection', socket => {
+  // Se for o primeiro jogador, entra como TR para poder testar a bomba!
+  const t = Object.keys(state.players).length === 0 ? 'TR' : 'CT';
+  const spawn = t === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
+  
+  state.players[socket.id] = { 
+    id: socket.id, team: t, x: spawn.x, y: spawn.y, angle: 0, hp: 100, 
+    alive: true, hasC4: false, weapon: 'rifle', keys: {}, lastShot: 0,
+    grenades: { smoke: 1, flash: 1, he: 1, molotov: 1 }
+  };
+  
+  // INICIA O JOGO IMEDIATAMENTE (mesmo com 1 jogador)
+  if (Object.keys(state.players).length >= 1 && state.round.status === 'WARMUP') startRound();
+
+  socket.on('input', data => { if (state.players[socket.id]) { state.players[socket.id].keys = data.keys; state.players[socket.id].angle = data.angle; } });
+  
+  socket.on('shoot', () => {
+    let p = state.players[socket.id];
+    if (!p || !p.alive || state.round.status !== 'LIVE') return;
+    let w = WEAPONS[p.weapon];
+    if (Date.now() - p.lastShot >= w.cooldown) {
+      p.lastShot = Date.now();
+      for (let i = 0; i < w.pellets; i++) {
+        let spread = p.angle + (Math.random() - 0.5) * w.spread;
+        state.bullets.push({ x: p.x, y: p.y, vx: Math.cos(spread) * w.speed, vy: Math.sin(spread) * w.speed, damage: w.damage, team: p.team });
+      }
     }
   });
 
-  socket.on('shoot', () => {
-    const p = gameState.players[socket.id];
-    if (!p || !p.alive) return;
-    const now = Date.now();
-    if (now - p.lastShot > 130) {
-      p.lastShot = now;
-      gameState.bullets.push({
-        x: p.x + Math.cos(p.angle) * 20,
-        y: p.y + Math.sin(p.angle) * 20,
-        vx: Math.cos(p.angle + (Math.random() - 0.5) * 0.05) * 15,
-        vy: Math.sin(p.angle + (Math.random() - 0.5) * 0.05) * 15,
-        team: p.team
+  socket.on('switch', w => { if (WEAPONS[w]) state.players[socket.id].weapon = w; });
+  
+  socket.on('grenade', type => {
+    let p = state.players[socket.id];
+    if (p && p.alive && p.grenades[type] > 0) {
+      p.grenades[type]--;
+      state.grenades.push({
+        type: type, team: p.team, x: p.x, y: p.y,
+        vx: Math.cos(p.angle) * 12, vy: Math.sin(p.angle) * 12, timer: 60
       });
     }
-  });
-
-  socket.on('throwGrenade', (data) => {
-    const p = gameState.players[socket.id];
-    if (!p || !p.alive) return;
-    const now = Date.now();
-    if (now - p.lastGrenade < 800) return; // Cooldown de arremesso
-    p.lastGrenade = now;
-
-    const dx = data.targetX - p.x;
-    const dy = data.targetY - p.y;
-    const dist = Math.min(Math.hypot(dx, dy), 380);
-    const angle = Math.atan2(dy, dx);
-
-    gameState.grenades.push({
-      type: data.type,
-      x: p.x,
-      y: p.y,
-      targetX: p.x + Math.cos(angle) * dist,
-      targetY: p.y + Math.sin(angle) * dist,
-      speed: 12
-    });
   });
 
   socket.on('disconnect', () => {
-    const p = gameState.players[socket.id];
-    if (p) dropC4IfCarried(p);
-    delete gameState.players[socket.id];
+    if (state.players[socket.id]?.hasC4) { state.c4.status = 'dropped'; state.c4.x = state.players[socket.id].x; state.c4.y = state.players[socket.id].y; }
+    delete state.players[socket.id];
   });
 });
 
-// Loop principal (60 FPS)
-setInterval(() => {
-  const now = Date.now();
-
-  // Coleta C4
-  if (gameState.c4.status === 'dropped') {
-    Object.values(gameState.players).forEach(p => {
-      if (p.alive && p.team === 'TR' && !p.hasC4 && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 25) {
-        p.hasC4 = true;
-        gameState.c4.status = 'carried';
-        gameState.c4.carrierId = p.id;
-      }
-    });
-  }
-
-  // Movimento e Ações
-  Object.values(gameState.players).forEach(p => {
-    if (!p.alive) return;
-    const speed = 2.4;
-    let dx = 0, dy = 0;
-
-    if (p.inputs.w) dy -= 1;
-    if (p.inputs.s) dy += 1;
-    if (p.inputs.a) dx -= 1;
-    if (p.inputs.d) dx += 1;
-
-    if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
-
-    p.x += dx * speed;
-    MAP.walls.forEach(w => { if (circleRectCollision(p.x, p.y, 14, w)) p.x -= dx * speed; });
-
-    p.y += dy * speed;
-    MAP.walls.forEach(w => { if (circleRectCollision(p.x, p.y, 14, w)) p.y -= dy * speed; });
-
-    // Plant / Defuse
-    if (p.inputs.e) {
-      const inSite = isInside(p.x, p.y, MAP.siteA) || isInside(p.x, p.y, MAP.siteB);
-      
-      // Plant C4 (Exatos 4.0 Segundos)
-      if (p.team === 'TR' && p.hasC4 && inSite && (gameState.c4.status === 'carried' || gameState.c4.status === 'planting')) {
-        gameState.c4.status = 'planting';
-        gameState.c4.carrierId = p.id;
-        gameState.c4.plantProgress += (100 / (4.0 * 60));
-        if (gameState.c4.plantProgress >= 100) {
-          gameState.c4.status = 'planted';
-          gameState.c4.x = p.x;
-          gameState.c4.y = p.y;
-          p.hasC4 = false;
-          gameState.c4.carrierId = null;
-          gameState.c4.plantProgress = 0;
-          startC4Timer();
-        }
-      }
-
-      // Defuse C4 (Exatos 5.0 Segundos)
-      if (p.team === 'CT' && (gameState.c4.status === 'planted' || gameState.c4.status === 'defusing')) {
-        if (Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 40) {
-          gameState.c4.status = 'defusing';
-          gameState.c4.defuseProgress += (100 / (5.0 * 60));
-          if (gameState.c4.defuseProgress >= 100) {
-            gameState.c4.status = 'defused';
-            gameState.c4.defuseProgress = 0;
-            if (c4TickInterval) clearInterval(c4TickInterval);
-          }
-        }
-      }
-    } else {
-      if (gameState.c4.status === 'planting' && gameState.c4.carrierId === p.id) {
-        gameState.c4.status = 'carried';
-        gameState.c4.plantProgress = 0;
-      }
-      if (gameState.c4.status === 'defusing' && p.team === 'CT') {
-        gameState.c4.status = 'planted';
-        gameState.c4.defuseProgress = 0;
-      }
-    }
-  });
-
-  // Atualização de Granadas em Voo
-  for (let i = gameState.grenades.length - 1; i >= 0; i--) {
-    const g = gameState.grenades[i];
-    const dx = g.targetX - g.x;
-    const dy = g.targetY - g.y;
-    const dist = Math.hypot(dx, dy);
-
-    if (dist < g.speed) {
-      g.x = g.targetX;
-      g.y = g.targetY;
-      
-      // Detonação
-      if (g.type === 'smoke') {
-        gameState.activeEffects.smokes.push({ x: g.x, y: g.y, radius: 95, expiresAt: now + 12000 });
-      } else if (g.type === 'molotov') {
-        gameState.activeEffects.molotovs.push({ x: g.x, y: g.y, radius: 80, expiresAt: now + 7000 });
-      } else if (g.type === 'he') {
-        Object.values(gameState.players).forEach(p => {
-          if (!p.alive) return;
-          const d = Math.hypot(p.x - g.x, p.y - g.y);
-          if (d < 110) {
-            p.hp -= Math.floor((1 - d / 110) * 80);
-            if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
-          }
-        });
-      } else if (g.type === 'flash') {
-        io.emit('flashEvent', { x: g.x, y: g.y, radius: 450 });
-      }
-      gameState.grenades.splice(i, 1);
-    } else {
-      const angle = Math.atan2(dy, dx);
-      g.x += Math.cos(angle) * g.speed;
-      g.y += Math.sin(angle) * g.speed;
-    }
-  }
-
-  // Efeitos Ativos (Smoke / Fogo)
-  gameState.activeEffects.smokes = gameState.activeEffects.smokes.filter(s => s.expiresAt > now);
-  gameState.activeEffects.molotovs = gameState.activeEffects.molotovs.filter(m => {
-    if (m.expiresAt <= now) return false;
-    Object.values(gameState.players).forEach(p => {
-      if (p.alive && Math.hypot(p.x - m.x, p.y - m.y) < m.radius) {
-        p.hp -= 0.5; // Dano do Fogo
-        if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
-      }
-    });
-    return true;
-  });
-
-  // Projetéis de Tiros
-  for (let i = gameState.bullets.length - 1; i >= 0; i--) {
-    const b = gameState.bullets[i];
-    b.x += b.vx;
-    b.y += b.vy;
-
-    let hit = MAP.walls.some(w => circleRectCollision(b.x, b.y, 3, w));
-
-    if (!hit) {
-      Object.values(gameState.players).forEach(p => {
-        if (p.alive && p.team !== b.team && Math.hypot(p.x - b.x, p.y - b.y) < 14) {
-          p.hp -= 28;
-          hit = true;
-          if (p.hp <= 0) { p.hp = 0; p.alive = false; dropC4IfCarried(p); }
-        }
-      });
-    }
-
-    if (hit || b.x < 0 || b.x > MAP.width || b.y < 0 || b.y > MAP.height) {
-      gameState.bullets.splice(i, 1);
-    }
-  }
-
-  io.emit('stateUpdate', gameState);
-}, 1000 / 60);
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+const PORT = 3000;
+server.listen(PORT, () => console.log(`Rodando em http://localhost:${PORT}`));

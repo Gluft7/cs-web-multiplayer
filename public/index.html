@@ -1,15 +1,26 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <title>CS Web Multiplayer Online</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="/socket.io/socket.io.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FPS 2.5D</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #instructions {
+            position: absolute; top: 10px; left: 10px;
+            color: white; font-family: Arial, sans-serif;
+            background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;
+            pointer-events: none;
+        }
+    </style>
 </head>
 <body>
-  <div id="game-container">
-    <canvas id="gameCanvas" width="1000" height="650"></canvas>
-  </div>
-  <script src="client.js"></script>
+    <div id="instructions">Clique na tela para jogar<br>W,A,S,D para andar<br>Mouse para mirar<br>Botão esquerdo para atirar<br>E para Plantar/Defusar</div>
+    <canvas id="gameCanvas"></canvas>
+    
+    <!-- IMPORTANTE: O Socket.io DEVE ser importado antes do client.js -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
 </body>
 </html>
