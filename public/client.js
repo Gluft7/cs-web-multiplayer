@@ -35,6 +35,9 @@ window.addEventListener('keydown', e => {
   if (k === 'x') socket.emit('grenade', 'smoke');
   if (k === 'c') socket.emit('grenade', 'flash');
   if (k === 'v') socket.emit('grenade', 'he');
+  
+  // NOVA BIND: Mudar de time
+  if (k === 'm') socket.emit('switchTeam');
 
   socket.emit('input', { keys, angle: localAngle });
 });
@@ -81,7 +84,6 @@ function draw3D(cam) {
 
   let entities = [];
   
-  // Incluindo Jogadores, Granadas voando, Balas e Efeitos (Fumaça/Fogo) para o Raycaster enxergar
   Object.values(gameState.players).forEach(p => { if (p.alive && p.id !== cam.id) entities.push({ ...p, isPlayer: true }); });
   gameState.grenades.forEach(g => entities.push({ ...g, isGrenade: true }));
   gameState.bullets.forEach(b => entities.push({ ...b, isBullet: true }));
@@ -177,9 +179,10 @@ function drawMinimap(cam) {
 }
 
 function drawHUD(cam) {
-  ctx.fillStyle = 'rgba(20, 20, 20, 0.9)'; ctx.fillRect(20, canvas.height - 80, 250, 60);
+  ctx.fillStyle = 'rgba(20, 20, 20, 0.9)'; ctx.fillRect(20, canvas.height - 80, 300, 60);
   ctx.fillStyle = '#fff'; ctx.font = '18px Arial'; ctx.textAlign = 'left';
-  ctx.fillText(`HP: ${cam.hp} | ARMA: ${cam.weapon.toUpperCase()}`, 35, canvas.height - 45);
+  // Exibindo o Time atual na HUD para facilitar
+  ctx.fillText(`TIME: ${cam.team} | HP: ${cam.hp} | ARMA: ${cam.weapon.toUpperCase()}`, 35, canvas.height - 45);
 
   ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(canvas.width/2 - 40, 20, 80, 40);
   ctx.fillStyle = gameState.c4.status === 'planted' ? 'red' : '#fff';

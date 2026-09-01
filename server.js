@@ -164,7 +164,6 @@ setInterval(() => {
     }
   }
 
-  // Timer dos efeitos (Fumaça e Fogo)
   for (let i = state.effects.length - 1; i >= 0; i--) {
     state.effects[i].life--;
     if (state.effects[i].life <= 0) state.effects.splice(i, 1);
@@ -199,7 +198,6 @@ setInterval(() => {
 }, 1000);
 
 io.on('connection', socket => {
-  // Se for o primeiro jogador, entra como TR para poder testar a bomba!
   const t = Object.keys(state.players).length === 0 ? 'TR' : 'CT';
   const spawn = t === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
   
@@ -209,8 +207,29 @@ io.on('connection', socket => {
     grenades: { smoke: 1, flash: 1, he: 1, molotov: 1 }
   };
   
-  // INICIA O JOGO IMEDIATAMENTE (mesmo com 1 jogador)
   if (Object.keys(state.players).length >= 1 && state.round.status === 'WARMUP') startRound();
+
+  // Trocar de Time
+  socket.on('switchTeam', () => {
+    let p = state.players[socket.id];
+    if (p) {
+      // Se tiver a C4, solta ela no chão antes de virar CT
+      if (p.hasC4) {
+        p.hasC4 = false;
+        state.c4.status = 'dropped';
+        state.c4.x = p.x;
+        state.c4.y = p.y;
+      }
+      p.team = p.team === 'CT' ? 'TR' : 'CT';
+      
+      const newSpawn = p.team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
+      p.x = newSpawn.x + (Math.random() * 60 - 30);
+      p.y = newSpawn.y + (Math.random() * 60 - 30);
+      p.hp = 100;
+      p.alive = true;
+      p.grenades = { smoke: 1, flash: 1, he: 1, molotov: 1 };
+    }
+  });
 
   socket.on('input', data => { if (state.players[socket.id]) { state.players[socket.id].keys = data.keys; state.players[socket.id].angle = data.angle; } });
   
