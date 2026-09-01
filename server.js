@@ -27,9 +27,8 @@ const MAP = {
 const gameState = {
   players: {},
   bullets: [],
-  killFeed: [],
   c4: {
-    status: 'carried', // 'carried', 'dropped', 'planting', 'planted', 'defusing'
+    status: 'carried', // 'carried', 'dropped', 'planting', 'planted', 'defusing', 'defused', 'exploded'
     x: 0, y: 0, carrierId: null, plantProgress: 0, defuseProgress: 0, timer: 40, lethalRadius: 350
   }
 };
@@ -48,10 +47,30 @@ function isInside(x, y, rect) {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 
+function startC4Timer() {
+  gameState.c4.timer = 40;
+  if (c4TickInterval) clearInterval(c4TickInterval);
+  c4TickInterval = setInterval(() => {
+    if (gameState.c4.status === 'planted' || gameState.c4.status === 'defusing') {
+      gameState.c4.timer--;
+      if (gameState.c4.timer <= 0) {
+        gameState.c4.status = 'exploded';
+        Object.values(gameState.players).forEach(p => {
+          if (p.alive && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) <= gameState.c4.lethalRadius) {
+            p.hp = 0;
+            p.alive = false;
+          }
+        });
+        clearInterval(c4TickInterval);
+      }
+    }
+  }, 1000);
+}
+
 io.on('connection', (socket) => {
-  const isTR = Object.values(gameState.players).filter(p => p.team === 'TR').length <=
-               Object.values(gameState.players).filter(p => p.team === 'CT').length;
-  const team = isTR ? 'TR' : 'CT';
+  const trCount = Object.values(gameState.players).filter(p => p.team === 'TR').length;
+  const ctCount = Object.values(gameState.players).filter(p => p.team === 'CT').length;
+  const team = trCount <= ctCount ? 'TR' : 'CT';
   const spawn = team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
 
   gameState.players[socket.id] = {
@@ -67,10 +86,10 @@ io.on('connection', (socket) => {
     lastShot: 0
   };
 
-  // Atribui C4 ao primeiro TR se ninguém tiver
-  if (team === 'TR' && !gameState.c4.carrierId && gameState.c4.status === 'carried') {
+  if (team === 'TR' && !gameState.c4.carrierId && (gameState.c4.status === 'carried' || gameState.c4.status === 'dropped')) {
     gameState.players[socket.id].hasC4 = true;
     gameState.c4.carrierId = socket.id;
+    gameState.c4.status = 'carried';
   }
 
   socket.on('playerInput', (inputs) => {
@@ -85,7 +104,7 @@ io.on('connection', (socket) => {
     const p = gameState.players[socket.id];
     if (!p || !p.alive) return;
     const now = Date.now();
-    if (now - p.lastShot > 120) {
+    if (now - p.lastShot > 130) {
       p.lastShot = now;
       gameState.bullets.push({
         x: p.x + Math.cos(p.angle) * 20,
@@ -112,10 +131,21 @@ io.on('connection', (socket) => {
 
 // Loop do Servidor (60 Ticks / segundo)
 setInterval(() => {
-  // 1. Atualizar Jogadores
+  // Coletar C4 do chão se TR passar por cima
+  if (gameState.c4.status === 'dropped') {
+    Object.values(gameState.players).forEach(p => {
+      if (p.alive && p.team === 'TR' && !p.hasC4 && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 25) {
+        p.hasC4 = true;
+        gameState.c4.status = 'carried';
+        gameState.c4.carrierId = p.id;
+      }
+    });
+  }
+
+  // 1. Movimentação e Ações
   Object.values(gameState.players).forEach(p => {
     if (!p.alive) return;
-    let speed = 2.2;
+    const speed = 2.2;
     let dx = 0, dy = 0;
 
     if (p.inputs.w) dy -= 1;
@@ -125,47 +155,46 @@ setInterval(() => {
 
     if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
 
-    // Colisão eixo X
     p.x += dx * speed;
-    MAP.walls.forEach(w => {
-      if (circleRectCollision(p.x, p.y, 14, w)) {
-        p.x -= dx * speed;
-      }
-    });
+    MAP.walls.forEach(w => { if (circleRectCollision(p.x, p.y, 14, w)) p.x -= dx * speed; });
 
-    // Colisão eixo Y
     p.y += dy * speed;
-    MAP.walls.forEach(w => {
-      if (circleRectCollision(p.x, p.y, 14, w)) {
-        p.y -= dy * speed;
-      }
-    });
+    MAP.walls.forEach(w => { if (circleRectCollision(p.x, p.y, 14, w)) p.y -= dy * speed; });
 
-    // Ação da C4 via Tecla E
+    // Lógica da Tecla E (Plantar / Defusar C4)
     if (p.inputs.e) {
       const inSite = isInside(p.x, p.y, MAP.siteA) || isInside(p.x, p.y, MAP.siteB);
-      if (p.team === 'TR' && p.hasC4 && inSite && gameState.c4.status === 'carried') {
+      
+      // TR Plantando C4
+      if (p.team === 'TR' && p.hasC4 && inSite && (gameState.c4.status === 'carried' || gameState.c4.status === 'planting')) {
         gameState.c4.status = 'planting';
-        gameState.c4.plantProgress += 1.2;
+        gameState.c4.carrierId = p.id;
+        gameState.c4.plantProgress += (100 / (3.2 * 60)); // ~3.2 segundos
         if (gameState.c4.plantProgress >= 100) {
           gameState.c4.status = 'planted';
           gameState.c4.x = p.x;
           gameState.c4.y = p.y;
           p.hasC4 = false;
+          gameState.c4.carrierId = null;
+          gameState.c4.plantProgress = 0;
           startC4Timer();
         }
       }
-      if (p.team === 'CT' && gameState.c4.status === 'planted') {
-        if (Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 35) {
+
+      // CT Defusando C4
+      if (p.team === 'CT' && (gameState.c4.status === 'planted' || gameState.c4.status === 'defusing')) {
+        if (Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) < 40) {
           gameState.c4.status = 'defusing';
-          gameState.c4.defuseProgress += 0.8;
+          gameState.c4.defuseProgress += (100 / (4.5 * 60)); // ~4.5 segundos
           if (gameState.c4.defuseProgress >= 100) {
             gameState.c4.status = 'defused';
-            clearInterval(c4TickInterval);
+            gameState.c4.defuseProgress = 0;
+            if (c4TickInterval) clearInterval(c4TickInterval);
           }
         }
       }
     } else {
+      // Se soltar a tecla E, reseta o progresso
       if (gameState.c4.status === 'planting' && gameState.c4.carrierId === p.id) {
         gameState.c4.status = 'carried';
         gameState.c4.plantProgress = 0;
@@ -177,7 +206,7 @@ setInterval(() => {
     }
   });
 
-  // 2. Atualizar Tiros
+  // 2. Tiros
   for (let i = gameState.bullets.length - 1; i >= 0; i--) {
     const b = gameState.bullets[i];
     b.x += b.vx;
@@ -188,9 +217,10 @@ setInterval(() => {
     if (!hit) {
       Object.values(gameState.players).forEach(p => {
         if (p.alive && p.team !== b.team && Math.hypot(p.x - b.x, p.y - b.y) < 14) {
-          p.hp -= 30;
+          p.hp -= 28;
           hit = true;
           if (p.hp <= 0) {
+            p.hp = 0;
             p.alive = false;
             if (p.hasC4) {
               p.hasC4 = false;
@@ -209,25 +239,8 @@ setInterval(() => {
     }
   }
 
-  // Envia atualização geral para todos os clientes
   io.emit('stateUpdate', gameState);
 }, 1000 / 60);
 
-function startC4Timer() {
-  gameState.c4.timer = 40;
-  c4TickInterval = setInterval(() => {
-    gameState.c4.timer--;
-    if (gameState.c4.timer <= 0) {
-      gameState.c4.status = 'exploded';
-      Object.values(gameState.players).forEach(p => {
-        if (p.alive && Math.hypot(p.x - gameState.c4.x, p.y - gameState.c4.y) <= gameState.c4.lethalRadius) {
-          p.hp = 0;
-          p.alive = false;
-        }
-      });
-      clearInterval(c4TickInterval);
-    }
-  }, 1000);
-}
-
-server.listen(3000, () => console.log('Servidor rodando em http://localhost:3000'));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
