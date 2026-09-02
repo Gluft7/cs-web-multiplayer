@@ -200,7 +200,11 @@ io.on('connection', socket => {
       p.primaryWeapon = item;
       p.weapon = item;
     } else if (['molotov', 'smoke', 'flash', 'he'].includes(item)) {
-      p.grenades[item] = (p.grenades[item] || 0) + 1;
+      const limits = { flash: 2, molotov: 1, smoke: 1, he: 1 };
+      let current = p.grenades[item] || 0;
+      if (current < limits[item]) {
+        p.grenades[item] = current + 1;
+      }
     }
   });
 
@@ -300,6 +304,16 @@ io.on('connection', socket => {
       timer: 80, 
       ownerId: p.id 
     });
+  });
+
+  socket.on('quitMatch', () => {
+    let p = players[socket.id];
+    if (p && p.inMatch) {
+      killPlayer(p); 
+      p.inMatch = false; 
+      queue = queue.filter(id => id !== socket.id);
+      broadcastQueue();
+    }
   });
 
   socket.on('disconnect', () => {
@@ -564,6 +578,7 @@ function handleC4Logic() {
         c4.progress++;
         if (c4.progress >= 240) { 
           c4.status = 'planted';
+          c4.timer = 40 * 60; // CRAVADO O TIMER EXATO DE 40S
           carrier.hasC4 = false;
           carrier.weapon = carrier.primaryWeapon;
           c4.carrierId = null;

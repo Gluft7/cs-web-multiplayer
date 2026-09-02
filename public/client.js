@@ -120,6 +120,17 @@ function initUI() {
   document.getElementById('btnResumeGame').onclick = () => togglePause();
   document.getElementById('btnPauseSettings').onclick = () => showScreen('settingsScreen');
 
+  // NOVO BOTÃO: SAIR DA PARTIDA VIA MENU DE PAUSA (ESC)
+  const btnQuitMatch = document.getElementById('btnQuitMatch');
+  if (btnQuitMatch) {
+    btnQuitMatch.onclick = () => {
+      socket.emit('quitMatch');
+      inMatch = false;
+      isPaused = false;
+      showScreen('mainMenuScreen');
+    };
+  }
+
   document.getElementById('btnSaveSettings').onclick = () => {
     const nameVal = sanitizeInput(document.getElementById('nicknameInput').value);
     userNickname = nameVal || 'Player_' + Math.floor(1000 + Math.random() * 9000);
