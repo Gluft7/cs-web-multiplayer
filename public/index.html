@@ -1,26 +1,106 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-br">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FPS 2.5D</title>
-    <style>
-        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #000; }
-        canvas { display: block; }
-        #instructions {
-            position: absolute; top: 10px; left: 10px;
-            color: white; font-family: Arial, sans-serif;
-            background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;
-            pointer-events: none;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2D CS Top-Down</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="instructions">Clique na tela para jogar<br>W,A,S,D para andar<br>Mouse para mirar<br>Botão esquerdo para atirar<br>E para Plantar/Defusar</div>
-    <canvas id="gameCanvas"></canvas>
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- MENU PRINCIPAL -->
+  <div id="mainMenuScreen" class="screen active">
+    <h1>2D CS MULTIPLAYER</h1>
+    <div class="menu-buttons">
+      <button id="btnPlay" class="btn">JOGAR / ENTRAR NA FILA</button>
+      <button id="btnSettings" class="btn">CONFIGURAÇÕES</button>
+      <button id="btnAbout" class="btn">SOBRE</button>
+    </div>
+  </div>
+
+  <!-- TELA DE FILA / ROOM -->
+  <div id="queueScreen" class="screen">
+    <h2>SALA DE ESPERA</h2>
+    <p>Jogadores na Fila: <span id="queueCount">0 / 10</span></p>
+    <p>Líder da Sala: <strong id="ownerName">---</strong></p>
     
-    <!-- IMPORTANTE: O Socket.io DEVE ser importado antes do client.js -->
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="client.js"></script>
+    <div class="player-list-container">
+      <h3>Jogadores Conectados:</h3>
+      <ul id="queueList"></ul>
+    </div>
+
+    <div class="menu-buttons">
+      <button id="btnStartMatch" class="btn btn-success" style="display: none;">INICIAR PARTIDA</button>
+      <button id="btnCancelQueue" class="btn btn-danger">SAIR DA FILA</button>
+    </div>
+  </div>
+
+  <!-- TELA DE CONFIGURAÇÕES -->
+  <div id="settingsScreen" class="screen">
+    <h2>CONFIGURAÇÕES</h2>
+    
+    <div class="setting-group">
+      <label>Nickname:</label>
+      <input type="text" id="nicknameInput" maxlength="15">
+    </div>
+
+    <h3>CONTROLES / BINDS DAS GRANADAS</h3>
+    <div class="setting-group">
+      <label>Granada 1 (Molotov):</label>
+      <input type="text" id="bindG1" class="bind-input" maxlength="1">
+    </div>
+    <div class="setting-group">
+      <label>Granada 2 (Smoke):</label>
+      <input type="text" id="bindG2" class="bind-input" maxlength="1">
+    </div>
+    <div class="setting-group">
+      <label>Granada 3 (Flash):</label>
+      <input type="text" id="bindG3" class="bind-input" maxlength="1">
+    </div>
+    <div class="setting-group">
+      <label>Granada 4 (HE):</label>
+      <input type="text" id="bindG4" class="bind-input" maxlength="1">
+    </div>
+
+    <!-- NOVA SEÇÃO: CONFIGURAÇÃO DE MAPA / CÂMERA -->
+    <h3>CÂMERA E MAPA</h3>
+    <div class="setting-group">
+      <label><input type="radio" name="cameraMode" value="full"> Mapa Completo</label><br>
+      <label><input type="radio" name="cameraMode" value="player" checked> Zoom no Jogador</label><br>
+      <label><input type="radio" name="cameraMode" value="custom"> Zoom Personalizado</label>
+    </div>
+
+    <div class="setting-group" id="zoomSliderGroup" style="display: none;">
+      <label>ZOOM: <span id="zoomValueText">50%</span></label>
+      <input type="range" id="zoomSlider" min="0" max="100" value="50">
+    </div>
+
+    <div class="menu-buttons">
+      <button id="btnSaveSettings" class="btn btn-success">SALVAR E VOLTAR</button>
+      <button id="btnBackSettings" class="btn">VOLTAR</button>
+    </div>
+  </div>
+
+  <!-- TELA SOBRE -->
+  <div id="aboutScreen" class="screen">
+    <h2>SOBRE O JOGO</h2>
+    <p>Jogo 2D Multiplayer Top-Down de tiro tático estilo Counter-Strike.</p>
+    <div class="menu-buttons">
+      <button id="btnBackAbout" class="btn">VOLTAR</button>
+    </div>
+  </div>
+
+  <!-- TELA DE PAUSE (ABERTA COM ESC DURANTE A PARTIDA) -->
+  <div id="pauseScreen" class="screen">
+    <h2>PAUSE / CONFIGURAÇÕES</h2>
+    <div class="menu-buttons">
+      <button id="btnResumeGame" class="btn btn-success">VOLTAR AO JOGO</button>
+      <button id="btnPauseSettings" class="btn">CONFIGURAÇÕES DE CÂMERA/BINDS</button>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
 </body>
 </html>

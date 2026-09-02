@@ -4,285 +4,596 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server);
 
 app.use(express.static('public'));
 
-const MAP = {
-  width: 1400, height: 800,
-  siteA: { x: 100, y: 80, w: 200, h: 200, name: 'A' },
-  siteB: { x: 1100, y: 80, w: 200, h: 200, name: 'B' },
-  ctSpawn: { x: 700, y: 120 }, trSpawn: { x: 700, y: 720 },
-  walls: [
-    { x: 0, y: 0, w: 1400, h: 20 }, { x: 0, y: 780, w: 1400, h: 20 },
-    { x: 0, y: 0, w: 20, h: 800 }, { x: 1380, y: 0, w: 20, h: 800 },
-    { x: 120, y: 350, w: 250, h: 30 }, { x: 220, y: 480, w: 30, h: 180 },
-    { x: 350, y: 480, w: 180, h: 30 }, { x: 250, y: 220, w: 30, h: 140 },
-    { x: 380, y: 100, w: 30, h: 200 }, { x: 100, y: 560, w: 140, h: 30 },
-    { x: 1030, y: 350, w: 250, h: 30 }, { x: 1150, y: 480, w: 30, h: 180 },
-    { x: 870, y: 480, w: 180, h: 30 }, { x: 1120, y: 220, w: 30, h: 140 },
-    { x: 990, y: 100, w: 30, h: 200 }, { x: 1160, y: 560, w: 140, h: 30 },
-    { x: 450, y: 640, w: 160, h: 30 }, { x: 790, y: 640, w: 160, h: 30 },
-    { x: 500, y: 280, w: 120, h: 30 }, { x: 780, y: 280, w: 120, h: 30 },
-    { x: 600, y: 380, w: 200, h: 40 }, { x: 480, y: 420, w: 30, h: 150 },
-    { x: 890, y: 420, w: 30, h: 150 }
-  ]
-};
+const MAP_WIDTH = 1600;
+const MAP_HEIGHT = 1000;
+
+const mapWalls = [
+  { x: 0, y: 0, w: 1600, h: 20 },
+  { x: 0, y: 0, w: 20, h: 1000 },
+  { x: 1580, y: 0, w: 20, h: 1000 },
+  { x: 0, y: 980, w: 1600, h: 20 },
+  { x: 400, y: 200, w: 300, h: 40 },
+  { x: 900, y: 200, w: 300, h: 40 },
+  { x: 760, y: 350, w: 80, h: 300 },
+  { x: 300, y: 650, w: 400, h: 40 },
+  { x: 900, y: 650, w: 400, h: 40 }
+];
+
+const BOMBSITES = [
+  { x: 100, y: 80, w: 200, h: 200, name: 'A' },
+  { x: 1100, y: 80, w: 200, h: 200, name: 'B' }
+];
 
 const WEAPONS = {
-  rifle:   { cooldown: 120, damage: 30, speed: 25, spread: 0.03, pellets: 1, moveSpeed: 2.5 },
-  smg:     { cooldown: 80,  damage: 15, speed: 20, spread: 0.08, pellets: 1, moveSpeed: 2.8 },
-  shotgun: { cooldown: 800, damage: 20, speed: 18, spread: 0.20, pellets: 8, moveSpeed: 2.4 },
-  awp:     { cooldown: 1400,damage: 120,speed: 35, spread: 0.001, pellets: 1, moveSpeed: 2.0 }
+  rifle:   { name: 'Rifle', fireRate: 160, damage: 32, maxRange: 1200, speed: 18, radius: 3 },
+  smg:     { name: 'SMG',   fireRate: 120, damage: 20, maxRange: 800,  speed: 16, radius: 3 },
+  shotgun: { name: 'Shotgun', fireRate: 850, damage: 18, pellets: 6, maxRange: 320, speed: 14, radius: 3 },
+  awp:     { name: 'AWP',   fireRate: 2000, damage: 115, maxRange: 2000, speed: 28, radius: 4 },
+  c4:      { name: 'C4',    fireRate: 9999, damage: 0, maxRange: 0, speed: 0, radius: 0 }
 };
 
-const state = {
-  players: {}, bullets: [], grenades: [], effects: [], mapWalls: MAP.walls,
-  c4: { status: 'carried', x: 0, y: 0, carrierId: null, progress: 0, timer: 0 },
-  round: { status: 'WARMUP', time: 30, winner: null, msg: '' }
+let players = {};
+let queue = [];
+let roomOwnerId = null;
+let matchActive = false;
+let roundTimer = 115;
+let buyPhaseTimer = 6;
+let buyPhaseActive = false;
+let roundInterval = null;
+let secondTimerInterval = null;
+let tracers = []; // Substitui as balas voando, armazena os rastros instantâneos
+let grenades = [];
+let effects = [];
+let deadBodies = []; // Array para os corpos X no chão
+
+let c4 = {
+  x: 0, y: 0,
+  status: 'dropped',
+  carrierId: null,
+  defuserId: null,
+  timer: 40 * 60,
+  progress: 0
 };
 
-function checkCollision(cx, cy, radius, rect) {
-  const nearX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
-  const nearY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
-  return (Math.pow(cx - nearX, 2) + Math.pow(cy - nearY, 2)) <= (radius * radius);
+// --- FUNÇÕES MATEMÁTICAS PARA O HITSCAN (RAYCASTING) ---
+function getLineIntersection(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y) {
+  let s1_x = p1_x - p0_x, s1_y = p1_y - p0_y;
+  let s2_x = p3_x - p2_x, s2_y = p3_y - p2_y;
+  let denom = (-s2_x * s1_y + s1_x * s2_y);
+  if (denom === 0) return null;
+  let s = (-s1_y * (p0_x - p2_x) + s1_x * (p0_y - p2_y)) / denom;
+  let t = ( s2_x * (p0_y - p2_y) - s2_y * (p0_x - p2_x)) / denom;
+  if (s >= 0 && s <= 1 && t >= 0 && t <= 1) return { x: p0_x + (t * s1_x), y: p0_y + (t * s1_y) };
+  return null;
 }
 
-function resolveCollision(x, y, radius) {
-  for (let wall of MAP.walls) if (checkCollision(x, y, radius, wall)) return true;
+function getClosestWallHit(x1, y1, x2, y2, walls) {
+  let closestDist = Infinity;
+  let closestHit = { x: x2, y: y2 };
+  for (let w of walls) {
+    let lines = [
+      [w.x, w.y, w.x + w.w, w.y], // Topo
+      [w.x, w.y + w.h, w.x + w.w, w.y + w.h], // Base
+      [w.x, w.y, w.x, w.y + w.h], // Esq
+      [w.x + w.w, w.y, w.x + w.w, w.y + w.h] // Dir
+    ];
+    for (let l of lines) {
+      let hit = getLineIntersection(x1, y1, x2, y2, l[0], l[1], l[2], l[3]);
+      if (hit) {
+        let d = Math.hypot(hit.x - x1, hit.y - y1);
+        if (d < closestDist) {
+          closestDist = d;
+          closestHit = hit;
+        }
+      }
+    }
+  }
+  return { hit: closestHit, dist: closestDist };
+}
+
+function lineIntersectsCircleCoords(x1, y1, x2, y2, cx, cy, r) {
+  let dx = x2 - x1, dy = y2 - y1;
+  let len2 = dx * dx + dy * dy;
+  if (len2 === 0) {
+    let d = Math.hypot(cx - x1, cy - y1);
+    return { hit: d <= r, dist: d };
+  }
+  let t = Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2));
+  let projX = x1 + t * dx, projY = y1 + t * dy;
+  let d2 = Math.hypot(cx - projX, cy - projY);
+  if (d2 <= r) {
+    return { hit: true, dist: Math.hypot(projX - x1, projY - y1) };
+  }
+  return { hit: false };
+}
+// -----------------------------------------------------
+
+function checkWallCollision(x, y, radius) {
+  for (let w of mapWalls) {
+    if (x + radius > w.x && x - radius < w.x + w.w && y + radius > w.y && y - radius < w.y + w.h) {
+      return true;
+    }
+  }
   return false;
 }
 
-function startRound() {
-  state.round.status = 'LIVE'; state.round.time = 90; state.round.msg = '';
-  state.bullets = []; state.grenades = []; state.effects = [];
+function killPlayer(p) {
+  if (!p.alive) return;
+  p.hp = 0;
+  p.alive = false;
   
-  Object.values(state.players).forEach(p => {
-    p.alive = true; p.hp = 100; p.hasC4 = false;
-    p.grenades = { smoke: 1, flash: 1, he: 1, molotov: 1 };
-    const spawn = p.team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
-    p.x = spawn.x + (Math.random() * 60 - 30);
-    p.y = spawn.y + (Math.random() * 60 - 30);
-  });
-  
-  state.c4 = { status: 'carried', x: 0, y: 0, carrierId: null, progress: 0, timer: 40 };
-  const trs = Object.values(state.players).filter(p => p.team === 'TR');
-  if (trs.length > 0) {
-    const carrier = trs[Math.floor(Math.random() * trs.length)];
-    carrier.hasC4 = true; state.c4.carrierId = carrier.id;
+  p.deathTime = Date.now();
+  deadBodies.push({ x: p.x, y: p.y, team: p.team });
+
+  if (p.hasC4) {
+    p.hasC4 = false;
+    c4.status = 'dropped';
+    c4.x = p.x;
+    c4.y = p.y;
+    c4.carrierId = null;
+    p.weapon = p.primaryWeapon;
   }
 }
-
-function endRound(winner, msg) {
-  if (state.round.status === 'ENDED') return;
-  state.round.status = 'ENDED'; state.round.winner = winner; state.round.msg = msg;
-  setTimeout(startRound, 5000);
-}
-
-setInterval(() => {
-  let totalPlayers = Object.keys(state.players).length;
-
-  Object.values(state.players).forEach(p => {
-    if (!p.alive) return;
-    
-    // Movimentação
-    let dx = 0, dy = 0;
-    if (p.keys.w) { dx += Math.cos(p.angle); dy += Math.sin(p.angle); }
-    if (p.keys.s) { dx -= Math.cos(p.angle); dy -= Math.sin(p.angle); }
-    if (p.keys.a) { dx += Math.cos(p.angle - Math.PI/2); dy += Math.sin(p.angle - Math.PI/2); }
-    if (p.keys.d) { dx += Math.cos(p.angle + Math.PI/2); dy += Math.sin(p.angle + Math.PI/2); }
-    
-    const mag = Math.hypot(dx, dy);
-    if (mag > 0) { dx /= mag; dy /= mag; } 
-
-    const speed = (WEAPONS[p.weapon] || WEAPONS.rifle).moveSpeed;
-    if (!resolveCollision(p.x + dx * speed, p.y, 14)) p.x += dx * speed;
-    if (!resolveCollision(p.x, p.y + dy * speed, 14)) p.y += dy * speed;
-
-    // Lógica de pegar a C4 do chão (TR apenas)
-    if (p.team === 'TR' && state.c4.status === 'dropped' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 25) {
-      p.hasC4 = true;
-      state.c4.status = 'carried';
-      state.c4.carrierId = p.id;
-    }
-
-    // Lógica de Plant e Defuse (Corrigida para não bugar com outros players)
-    if (p.keys.e && state.round.status === 'LIVE') {
-      const inA = (p.x > MAP.siteA.x && p.x < MAP.siteA.x+MAP.siteA.w && p.y > MAP.siteA.y && p.y < MAP.siteA.y+MAP.siteA.h);
-      const inB = (p.x > MAP.siteB.x && p.x < MAP.siteB.x+MAP.siteB.w && p.y > MAP.siteB.y && p.y < MAP.siteB.y+MAP.siteB.h);
-
-      if (p.team === 'TR' && p.hasC4 && (inA || inB)) {
-        state.c4.status = 'planting'; state.c4.progress += (100 / (60 * 4)); 
-        if (state.c4.progress >= 100) { state.c4.status = 'planted'; state.c4.x = p.x; state.c4.y = p.y; p.hasC4 = false; }
-      }
-      if (p.team === 'CT' && state.c4.status === 'planted' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 50) {
-        state.c4.status = 'defusing'; state.c4.progress += (100 / (60 * 5));
-        if (state.c4.progress >= 101) endRound('CT', 'BOMBA DESARMADA!');
-      }
-    } else {
-      // Só reseta o progresso se quem estava plantando/defusando soltar o E
-      if (p.hasC4 && state.c4.status === 'planting') { state.c4.status = 'carried'; state.c4.progress = 0; }
-      if (p.team === 'CT' && state.c4.status === 'defusing' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 50) { 
-        state.c4.status = 'planted'; state.c4.progress = 0; 
-      }
-    }
-  });
-
-  // Física e Remoção de Balas
-  for (let i = state.bullets.length - 1; i >= 0; i--) {
-    let b = state.bullets[i];
-    let hit = false;
-    for(let s = 0; s < 10; s++) {
-      b.x += b.vx / 10; b.y += b.vy / 10;
-      if (resolveCollision(b.x, b.y, 2)) { hit = true; break; }
-      Object.values(state.players).forEach(p => {
-        if (p.alive && p.team !== b.team && Math.hypot(p.x - b.x, p.y - b.y) < 14) {
-          p.hp -= b.damage; hit = true;
-        }
-      });
-      if (hit) break;
-    }
-    if (hit) state.bullets.splice(i, 1);
-  }
-
-  // Física de Granadas
-  for (let i = state.grenades.length - 1; i >= 0; i--) {
-    let g = state.grenades[i];
-    if (resolveCollision(g.x + g.vx, g.y, 5)) g.vx *= -0.7; else g.x += g.vx;
-    if (resolveCollision(g.x, g.y + g.vy, 5)) g.vy *= -0.7; else g.y += g.vy;
-    g.vx *= 0.95; g.vy *= 0.95;
-    g.timer--;
-
-    if (g.timer <= 0) {
-      if (g.type === 'smoke') state.effects.push({ type: 'smoke', x: g.x, y: g.y, life: 60 * 15, radius: 110 });
-      if (g.type === 'molotov') state.effects.push({ type: 'molotov', x: g.x, y: g.y, life: 60 * 7, radius: 90 });
-      if (g.type === 'he') {
-        Object.values(state.players).forEach(p => {
-          let dist = Math.hypot(p.x - g.x, p.y - g.y);
-          if (p.alive && dist < 150) p.hp -= Math.floor((1 - dist/150) * 80);
-        });
-      }
-      if (g.type === 'flash') {
-        // Flash agora cega qualquer um (CT ou TR) que estiver no raio de 600
-        Object.values(state.players).forEach(p => {
-          if (p.alive && Math.hypot(p.x - g.x, p.y - g.y) < 600) {
-            io.to(p.id).emit('flashEvent');
-          }
-        });
-      }
-      state.grenades.splice(i, 1);
-    }
-  }
-
-  // Timer dos efeitos
-  for (let i = state.effects.length - 1; i >= 0; i--) {
-    state.effects[i].life--;
-    if (state.effects[i].life <= 0) state.effects.splice(i, 1);
-  }
-
-  let trAlive = 0, ctAlive = 0;
-  Object.values(state.players).forEach(p => {
-    if (p.hp <= 0 && p.alive) { 
-      p.alive = false; 
-      p.hp = 0; 
-      // Dropa a C4 ao morrer
-      if (p.hasC4) { 
-        p.hasC4 = false; 
-        state.c4.status = 'dropped'; 
-        state.c4.x = p.x; 
-        state.c4.y = p.y; 
-      } 
-    }
-    if (p.alive) p.team === 'TR' ? trAlive++ : ctAlive++;
-  });
-
-  if (state.round.status === 'LIVE' && totalPlayers > 1) {
-    if (trAlive === 0 && state.c4.status !== 'planted') endRound('CT', 'CT VENCE!');
-    else if (ctAlive === 0) endRound('TR', 'TR VENCE!');
-  }
-
-  io.emit('sync', state);
-}, 1000 / 60);
-
-setInterval(() => {
-  if (state.round.status === 'LIVE' && state.c4.status !== 'planted') {
-    state.round.time--;
-    if (state.round.time <= 0) endRound('CT', 'TEMPO ESGOTOU!');
-  }
-  if (state.c4.status === 'planted' || state.c4.status === 'defusing') {
-    state.c4.timer--;
-    if (state.c4.timer <= 0) {
-      endRound('TR', 'BOMBA EXPLODIU!');
-      Object.values(state.players).forEach(p => { if (Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 450) p.hp = 0; });
-    }
-  }
-}, 1000);
 
 io.on('connection', socket => {
-  const t = Object.keys(state.players).length === 0 ? 'TR' : 'CT';
-  const spawn = t === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
-  
-  state.players[socket.id] = { 
-    id: socket.id, team: t, x: spawn.x, y: spawn.y, angle: 0, hp: 100, 
-    alive: true, hasC4: false, weapon: 'rifle', keys: {}, lastShot: 0,
-    grenades: { smoke: 1, flash: 1, he: 1, molotov: 1 }
+  players[socket.id] = {
+    id: socket.id,
+    nickname: 'Player',
+    x: 200, y: 500, angle: 0,
+    team: 'TR', hp: 100, alive: true, inMatch: false,
+    primaryWeapon: 'rifle', weapon: 'rifle',
+    grenades: { molotov: 0, smoke: 0, flash: 0, he: 0 },
+    lastShotTime: 0, hasC4: false,
+    radius: 14, speed: 3.5,
+    keys: { w: false, a: false, s: false, d: false, e: false, click: false }
   };
-  
-  if (Object.keys(state.players).length >= 1 && state.round.status === 'WARMUP') startRound();
 
-  socket.on('switchTeam', () => {
-    let p = state.players[socket.id];
-    if (p) {
-      if (p.hasC4) {
-        p.hasC4 = false;
-        state.c4.status = 'dropped';
-        state.c4.x = p.x;
-        state.c4.y = p.y;
-      }
-      p.team = p.team === 'CT' ? 'TR' : 'CT';
-      
-      const newSpawn = p.team === 'CT' ? MAP.ctSpawn : MAP.trSpawn;
-      p.x = newSpawn.x + (Math.random() * 60 - 30);
-      p.y = newSpawn.y + (Math.random() * 60 - 30);
-      p.hp = 100;
-      p.alive = true;
-      p.grenades = { smoke: 1, flash: 1, he: 1, molotov: 1 };
+  if (!roomOwnerId) roomOwnerId = socket.id;
+
+  socket.on('setNickname', name => {
+    let p = players[socket.id];
+    if (p && !p.inMatch) p.nickname = name || 'Player';
+  });
+
+  socket.on('joinQueue', () => {
+    if (!queue.includes(socket.id)) { 
+      queue.push(socket.id); 
+      if (!roomOwnerId) roomOwnerId = socket.id; 
+    }
+    broadcastQueue();
+  });
+
+  socket.on('leaveQueue', () => {
+    queue = queue.filter(id => id !== socket.id);
+    if (roomOwnerId === socket.id) roomOwnerId = queue[0] || Object.keys(players)[0] || null;
+    if (players[socket.id]) players[socket.id].inMatch = false;
+    broadcastQueue();
+  });
+
+  socket.on('manualStartMatch', () => {
+    if (socket.id === roomOwnerId || !roomOwnerId) {
+      startMatch();
     }
   });
 
-  socket.on('input', data => { if (state.players[socket.id]) { state.players[socket.id].keys = data.keys; state.players[socket.id].angle = data.angle; } });
+  socket.on('input', data => {
+    let p = players[socket.id];
+    if (p && p.alive && p.inMatch) {
+      p.keys = data.keys || p.keys;
+      if (data.angle !== undefined && !isNaN(data.angle)) p.angle = data.angle;
+    }
+  });
+
+  socket.on('buyItem', item => {
+    let p = players[socket.id];
+    if (!p || !p.inMatch || !p.alive) return;
+
+    let activeCount = Object.values(players).filter(pl => pl.inMatch).length;
+    if (!buyPhaseActive && activeCount > 1) return;
+
+    if (WEAPONS[item] && item !== 'c4') {
+      p.primaryWeapon = item;
+      p.weapon = item;
+    } else if (['molotov', 'smoke', 'flash', 'he'].includes(item)) {
+      p.grenades[item] = (p.grenades[item] || 0) + 1;
+    }
+  });
+
+  socket.on('switch', targetWeapon => { 
+    let p = players[socket.id]; 
+    if (!p || !p.alive || !p.inMatch) return;
+
+    let isPlanting = (c4.status === 'planting' && c4.carrierId === p.id);
+    let isDefusing = (c4.status === 'defusing' && c4.defuserId === p.id);
+    if (isPlanting || isDefusing) return;
+
+    if (targetWeapon === 'c4') {
+      if (p.hasC4) p.weapon = 'c4';
+    } else if (targetWeapon === p.primaryWeapon) {
+      p.weapon = p.primaryWeapon;
+    }
+  });
   
+  socket.on('switchTeam', () => { 
+    let p = players[socket.id]; 
+    if (p) p.team = p.team === 'CT' ? 'TR' : 'CT'; 
+  });
+
+  // SISTEMA DE TIRO HITSCAN (INSTANTÂNEO)
   socket.on('shoot', () => {
-    let p = state.players[socket.id];
-    if (!p || !p.alive || state.round.status !== 'LIVE') return;
-    let w = WEAPONS[p.weapon];
-    if (Date.now() - p.lastShot >= w.cooldown) {
-      p.lastShot = Date.now();
-      for (let i = 0; i < w.pellets; i++) {
-        let spread = p.angle + (Math.random() - 0.5) * w.spread;
-        state.bullets.push({ x: p.x, y: p.y, vx: Math.cos(spread) * w.speed, vy: Math.sin(spread) * w.speed, damage: w.damage, team: p.team });
+    let p = players[socket.id];
+    let activeCount = Object.values(players).filter(pl => pl.inMatch).length;
+    if (!p || !p.alive || !p.inMatch || p.weapon === 'c4') return;
+    if (buyPhaseActive && activeCount > 1) return;
+
+    let isPlanting = (c4.status === 'planting' && c4.carrierId === p.id);
+    let isDefusing = (c4.status === 'defusing' && c4.defuserId === p.id);
+    if (isPlanting || isDefusing) return;
+
+    let now = Date.now();
+    let wData = WEAPONS[p.weapon] || WEAPONS.rifle;
+    if (now - p.lastShotTime < wData.fireRate) return;
+    p.lastShotTime = now;
+
+    function processHitscanShot(angle) {
+      let endX = p.x + Math.cos(angle) * wData.maxRange;
+      let endY = p.y + Math.sin(angle) * wData.maxRange;
+      
+      // 1. Verifica Parede (Onde o tiro esbarra primeiro)
+      let wallHit = getClosestWallHit(p.x, p.y, endX, endY, mapWalls);
+      let actualEndX = wallHit.hit.x;
+      let actualEndY = wallHit.hit.y;
+      
+      // 2. Verifica Jogadores na reta entre o Atirador e a Parede
+      let hitPlayer = null;
+      let closestEnemyDist = Infinity;
+      
+      for (let target of Object.values(players)) {
+        if (target.inMatch && target.alive && target.id !== p.id) {
+           let res = lineIntersectsCircleCoords(p.x, p.y, actualEndX, actualEndY, target.x, target.y, target.radius + wData.radius);
+           if (res.hit && res.dist < closestEnemyDist) {
+              closestEnemyDist = res.dist;
+              hitPlayer = target;
+           }
+        }
       }
+
+      // 3. Aplica Dano se acertou
+      if (hitPlayer) {
+        // Encurta a linha do tiro para parar no corpo do inimigo
+        actualEndX = p.x + Math.cos(angle) * closestEnemyDist;
+        actualEndY = p.y + Math.sin(angle) * closestEnemyDist;
+        
+        // Aplica o Falloff normal de distância da arma
+        let dmg = Math.round(wData.damage * Math.max(0.2, 1 - (closestEnemyDist / wData.maxRange)));
+        hitPlayer.hp -= dmg;
+        if (hitPlayer.hp <= 0) killPlayer(hitPlayer);
+      }
+
+      // Cria um rastro de tiro visual para ser enviado para a tela de todo mundo (Dura 6 ticks/frames)
+      tracers.push({ startX: p.x, startY: p.y, endX: actualEndX, endY: actualEndY, duration: 6 });
+    }
+
+    if (p.weapon === 'shotgun') {
+      for (let i = -3; i <= 3; i++) {
+        processHitscanShot(p.angle + (i * 0.08));
+      }
+    } else {
+      processHitscanShot(p.angle);
     }
   });
 
-  socket.on('switch', w => { if (WEAPONS[w]) state.players[socket.id].weapon = w; });
-  
-  socket.on('grenade', type => {
-    let p = state.players[socket.id];
-    if (p && p.alive && p.grenades[type] > 0) {
-      p.grenades[type]--;
-      state.grenades.push({
-        type: type, team: p.team, x: p.x, y: p.y,
-        vx: Math.cos(p.angle) * 12, vy: Math.sin(p.angle) * 12, timer: 60
-      });
-    }
+  socket.on('grenade', data => {
+    let p = players[socket.id];
+    let activeCount = Object.values(players).filter(pl => pl.inMatch).length;
+    if (!p || !p.alive || !p.inMatch) return;
+    if (buyPhaseActive && activeCount > 1) return;
+
+    let isPlanting = (c4.status === 'planting' && c4.carrierId === p.id);
+    let isDefusing = (c4.status === 'defusing' && c4.defuserId === p.id);
+    if (isPlanting || isDefusing) return;
+
+    if (!p.grenades[data.type] || p.grenades[data.type] <= 0) return;
+    p.grenades[data.type]--;
+
+    let tx = data.targetX;
+    let ty = data.targetY;
+    let dist = Math.min(1200, Math.hypot(tx - p.x, ty - p.y));
+    let angle = Math.atan2(ty - p.y, tx - p.x);
+    let initialVel = dist / 16.5;
+
+    grenades.push({ 
+      x: p.x, y: p.y, 
+      vx: Math.cos(angle) * initialVel, 
+      vy: Math.sin(angle) * initialVel, 
+      type: data.type, 
+      throwType: data.throwType || 'jump',
+      timer: 80, 
+      ownerId: p.id 
+    });
   });
 
   socket.on('disconnect', () => {
-    if (state.players[socket.id]?.hasC4) { state.c4.status = 'dropped'; state.c4.x = state.players[socket.id].x; state.c4.y = state.players[socket.id].y; }
-    delete state.players[socket.id];
+    let p = players[socket.id];
+    if (p && p.hasC4) {
+      c4.status = 'dropped'; c4.x = p.x; c4.y = p.y; c4.carrierId = null; c4.defuserId = null;
+    }
+    queue = queue.filter(id => id !== socket.id);
+    delete players[socket.id];
+    if (roomOwnerId === socket.id) roomOwnerId = queue[0] || Object.keys(players)[0] || null;
+    broadcastQueue();
   });
+
+  broadcastQueue();
 });
 
-const PORT = 3000;
-server.listen(PORT, () => console.log(`Rodando em http://localhost:${PORT}`));
+function broadcastQueue() {
+  io.emit('queueUpdate', { 
+    count: queue.length, 
+    max: 10, 
+    ownerId: roomOwnerId, 
+    players: queue.map(id => ({ id, nickname: players[id] ? players[id].nickname : 'Player' })) 
+  });
+}
+
+function startMatch() {
+  matchActive = true;
+  roundTimer = 115;
+  buyPhaseTimer = 6;
+  buyPhaseActive = true;
+
+  c4 = { status: 'dropped', carrierId: null, defuserId: null, progress: 0, timer: 40 * 60, x: 150, y: 500 };
+  tracers = [];
+  grenades = [];
+  effects = [];
+  deadBodies = []; 
+
+  let ctSpawns = [{ x: 1400, y: 500 }, { x: 1450, y: 450 }, { x: 1450, y: 550 }];
+  let trSpawns = [{ x: 150, y: 500 }, { x: 100, y: 450 }, { x: 100, y: 550 }];
+  let ctIdx = 0, trIdx = 0;
+  
+  let targetIds = queue.length > 0 ? queue : Object.keys(players);
+  if (targetIds.length === 0) return;
+
+  if (targetIds.length === 1 && players[targetIds[0]]) {
+    players[targetIds[0]].team = 'TR';
+  }
+
+  let trPlayers = [];
+
+  targetIds.forEach(id => {
+    let p = players[id];
+    if (p) {
+      p.inMatch = true; p.hp = 100; p.alive = true; p.hasC4 = false;
+      p.deathTime = null;
+      p.weapon = p.primaryWeapon || 'rifle';
+      p.grenades = { molotov: 0, smoke: 0, flash: 0, he: 0 };
+      if (p.team === 'CT') { 
+        p.x = ctSpawns[ctIdx % ctSpawns.length].x; 
+        p.y = ctSpawns[ctIdx % ctSpawns.length].y; 
+        ctIdx++; 
+      } else { 
+        p.x = trSpawns[trIdx % trSpawns.length].x; 
+        p.y = trSpawns[trIdx % trSpawns.length].y; 
+        trIdx++; 
+        trPlayers.push(id); 
+      }
+    }
+  });
+
+  if (trPlayers.length > 0) {
+    let chosenId = trPlayers[Math.floor(Math.random() * trPlayers.length)];
+    c4.carrierId = chosenId;
+    c4.status = 'carried';
+    players[chosenId].hasC4 = true;
+  }
+
+  io.emit('matchStart');
+
+  if (secondTimerInterval) clearInterval(secondTimerInterval);
+  secondTimerInterval = setInterval(() => {
+    let activeCount = Object.values(players).filter(pl => pl.inMatch).length;
+
+    if (buyPhaseActive) {
+      if (activeCount > 1) {
+        buyPhaseTimer--;
+        if (buyPhaseTimer <= 0) {
+          buyPhaseActive = false;
+        }
+      } else {
+        buyPhaseTimer = 999;
+      }
+    } else {
+      if (roundTimer > 0) {
+        roundTimer--;
+      }
+    }
+  }, 1000);
+
+  if (roundInterval) clearInterval(roundInterval);
+  roundInterval = setInterval(gameLoop, 1000 / 60);
+}
+
+function gameLoop() {
+  let activeCount = Object.values(players).filter(pl => pl.inMatch).length;
+
+  if (!buyPhaseActive || activeCount === 1) {
+    Object.values(players).forEach(p => {
+      if (!p.inMatch || !p.alive) return;
+
+      let isPlanting = (c4.status === 'planting' && c4.carrierId === p.id);
+      let isDefusing = (c4.status === 'defusing' && c4.defuserId === p.id);
+
+      if (!isPlanting && !isDefusing) {
+        let dx = 0, dy = 0;
+        if (p.keys.w) dy -= 1; if (p.keys.s) dy += 1;
+        if (p.keys.a) dx -= 1; if (p.keys.d) dx += 1;
+        let len = Math.hypot(dx, dy);
+        if (len > 0) { dx /= len; dy /= len; }
+        let moveX = dx * p.speed, moveY = dy * p.speed;
+        if (!checkWallCollision(p.x + moveX, p.y, p.radius)) p.x += moveX;
+        if (!checkWallCollision(p.x, p.y + moveY, p.radius)) p.y += moveY;
+      }
+
+      if (p.team === 'TR' && c4.status === 'dropped') {
+        if (Math.hypot(p.x - c4.x, p.y - c4.y) < p.radius + 20) {
+          p.hasC4 = true;
+          c4.status = 'carried';
+          c4.carrierId = p.id;
+        }
+      }
+    });
+
+    // Diminui o tempo visual dos rastros dos tiros instantâneos (Tracers)
+    for (let i = tracers.length - 1; i >= 0; i--) {
+      tracers[i].duration--;
+      if (tracers[i].duration <= 0) tracers.splice(i, 1);
+    }
+
+    for (let i = grenades.length - 1; i >= 0; i--) {
+      let g = grenades[i];
+
+      if (g.throwType === 'bounce') {
+        let nextX = g.x + g.vx;
+        let nextY = g.y + g.vy;
+        let hitX = false, hitY = false;
+        
+        for (let w of mapWalls) {
+          if (nextX > w.x && nextX < w.x + w.w && g.y > w.y && g.y < w.y + w.h) hitX = true;
+          if (g.x > w.x && g.x < w.x + w.w && nextY > w.y && nextY < w.y + w.h) hitY = true;
+        }
+        
+        if (hitX) { g.vx *= -1; nextX = g.x + g.vx; }
+        if (hitY) { g.vy *= -1; nextY = g.y + g.vy; }
+        
+        g.x = nextX;
+        g.y = nextY;
+      } else {
+        g.x += g.vx; 
+        g.y += g.vy; 
+      }
+
+      g.vx *= 0.94; 
+      g.vy *= 0.94; 
+      g.timer--;
+
+      if (g.timer <= 0) {
+        if (g.type === 'smoke') {
+          effects.push({ x: g.x, y: g.y, type: 'smoke', radius: 110, duration: 450 });
+          effects = effects.filter(ef => !(ef.type === 'molotov' && Math.hypot(ef.x - g.x, ef.y - g.y) < 160));
+        } else if (g.type === 'molotov') {
+          let inSmoke = effects.some(ef => ef.type === 'smoke' && Math.hypot(ef.x - g.x, ef.y - g.y) < 160);
+          if (!inSmoke) effects.push({ x: g.x, y: g.y, type: 'molotov', radius: 80, duration: 250 });
+        } else if (g.type === 'flash') {
+          io.emit('flashEvent', { x: g.x, y: g.y });
+        } else if (g.type === 'he') {
+          Object.values(players).forEach(p => {
+            if (p.inMatch && p.alive && Math.hypot(p.x - g.x, p.y - g.y) < 120) {
+              p.hp -= Math.round((1 - Math.hypot(p.x - g.x, p.y - g.y) / 120) * 75);
+              if (p.hp <= 0) killPlayer(p);
+            }
+          });
+        }
+        grenades.splice(i, 1);
+      }
+    }
+
+    for (let i = effects.length - 1; i >= 0; i--) {
+      let ef = effects[i]; ef.duration--;
+      if (ef.type === 'molotov' && ef.duration % 20 === 0) {
+        Object.values(players).forEach(p => {
+          if (p.inMatch && p.alive && Math.hypot(p.x - ef.x, p.y - ef.y) < ef.radius) { 
+            p.hp -= 12; 
+            if (p.hp <= 0) killPlayer(p);
+          }
+        });
+      }
+      if (ef.duration <= 0) effects.splice(i, 1);
+    }
+
+    handleC4Logic();
+  }
+
+  // Envia Tracers no lugar das Bullets
+  io.emit('sync', { 
+    players, tracers, grenades, effects, c4, mapWalls, deadBodies,
+    round: { time: roundTimer, buyPhase: buyPhaseActive, buyTimer: buyPhaseTimer } 
+  });
+}
+
+function handleC4Logic() {
+  if (c4.status === 'carried' || c4.status === 'planting') {
+    let carrier = players[c4.carrierId];
+    if (!carrier || !carrier.alive || !carrier.inMatch || !carrier.hasC4) {
+      c4.status = 'dropped';
+      if (carrier) { c4.x = carrier.x; c4.y = carrier.y; }
+      c4.carrierId = null; 
+      c4.progress = 0;
+    } else {
+      c4.x = carrier.x; 
+      c4.y = carrier.y;
+      let inSite = BOMBSITES.some(s => carrier.x >= s.x && carrier.x <= s.x + s.w && carrier.y >= s.y && carrier.y <= s.y + s.h);
+      
+      if (inSite && carrier.weapon === 'c4' && (carrier.keys.e || carrier.keys.click)) {
+        c4.status = 'planting';
+        c4.progress++;
+        if (c4.progress >= 240) { 
+          c4.status = 'planted';
+          carrier.hasC4 = false;
+          carrier.weapon = carrier.primaryWeapon;
+          c4.carrierId = null;
+          c4.progress = 0;
+        }
+      } else {
+        c4.status = 'carried';
+        c4.progress = 0;
+      }
+    }
+  } else if (c4.status === 'planted' || c4.status === 'defusing') {
+    c4.timer--;
+    if (c4.timer <= 0) {
+      c4.status = 'exploded';
+      c4.defuserId = null;
+      return;
+    }
+
+    let activeDefuser = null;
+
+    for (let p of Object.values(players)) {
+      if (p.team === 'CT' && p.alive && p.inMatch && p.keys.e) {
+        let dist = Math.hypot(p.x - c4.x, p.y - c4.y);
+        
+        if (dist <= 35) {
+          let angleToC4 = Math.atan2(c4.y - p.y, c4.x - p.x);
+          let angleDiff = Math.abs(Math.atan2(Math.sin(angleToC4 - p.angle), Math.cos(angleToC4 - p.angle)));
+
+          let maxAngle = dist < 20 ? 1.6 : 0.95;
+          if (angleDiff <= maxAngle) {
+            activeDefuser = p;
+            break;
+          }
+        }
+      }
+    }
+
+    if (activeDefuser) {
+      c4.status = 'defusing';
+      c4.defuserId = activeDefuser.id;
+      c4.progress++;
+      if (c4.progress >= 300) { 
+        c4.status = 'defused';
+        c4.defuserId = null;
+      }
+    } else {
+      c4.status = 'planted';
+      c4.defuserId = null;
+      c4.progress = 0;
+    }
+  }
+}
+
+server.listen(process.env.PORT || 3000, () => console.log('Servidor rodando na porta 3000'));
