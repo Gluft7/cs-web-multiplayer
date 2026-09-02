@@ -116,8 +116,8 @@ setInterval(() => {
         if (state.c4.progress >= 100) { state.c4.status = 'planted'; state.c4.x = p.x; state.c4.y = p.y; p.hasC4 = false; }
       }
       if (p.team === 'CT' && state.c4.status === 'planted' && Math.hypot(p.x - state.c4.x, p.y - state.c4.y) < 50) {
-        state.c4.status = 'defusing'; state.c4.progress += (100 / (60 * 50));
-        if (state.c4.progress >= 100) endRound('CT', 'BOMBA DESARMADA!');
+        state.c4.status = 'defusing'; state.c4.progress += (100 / (60 * 5));
+        if (state.c4.progress >= 5000) endRound('CT', 'BOMBA DESARMADA!');
       }
     } else {
       // Só reseta o progresso se quem estava plantando/defusando soltar o E
